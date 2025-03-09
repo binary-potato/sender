@@ -1,15 +1,18 @@
-# Shared Utilities (save as utils.py)
+# app.py - Complete WAN Communication App
+import streamlit as st
 import base64
 import hashlib
 import json
 import os
 import secrets
 import time
+import uuid
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-import streamlit as st
 import requests
+
+# ---- UTILITY FUNCTIONS ----
 
 def generate_connection_code():
     """Generate a unique connection code for the receiver"""
@@ -57,7 +60,8 @@ def get_from_session(key, default=None):
     """Get value from session state"""
     return st.session_state.get(key, default)
 
-# Mock WAN server (in a real app, you'd use a proper database or message queue)
+# ---- MOCK WAN SERVER ----
+
 class MockWANServer:
     @staticmethod
     def register_receiver(connection_code, salt, endpoint):
@@ -128,11 +132,7 @@ class MockWANServer:
                 return message['response']
         return None
 
-# Receiver App (save as receiver_app.py)
-import streamlit as st
-import time
-from utils import generate_connection_code, generate_encryption_key, decrypt_message, encrypt_message
-from utils import save_to_session, get_from_session, MockWANServer
+# ---- RECEIVER APP FUNCTIONS ----
 
 def receiver_app():
     st.title("Encrypted WAN Receiver")
@@ -251,12 +251,7 @@ def process_request(request_data):
     if st.button("Check for Requests"):
         check_and_process_requests()
 
-# Sender App (save as sender_app.py)
-import streamlit as st
-import time
-import uuid
-from utils import generate_encryption_key, encrypt_message, decrypt_message
-from utils import save_to_session, get_from_session, MockWANServer
+# ---- SENDER APP FUNCTIONS ----
 
 def sender_app():
     st.title("Encrypted WAN Sender")
@@ -365,10 +360,7 @@ def sender_app():
             else:
                 st.info("No response yet or request still processing")
 
-# Main App (save as app.py)
-import streamlit as st
-from receiver_app import receiver_app
-from sender_app import sender_app
+# ---- MAIN APP ----
 
 def main():
     st.set_page_config(page_title="Encrypted WAN Communication", layout="wide")
