@@ -1,305 +1,389 @@
-import streamlit as st
-import serial
-import serial.tools.list_ports
-import time
+# Shared Utilities (save as utils.py)
+import base64
+import hashlib
 import json
-import threading
+import os
+import secrets
+import time
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+import streamlit as st
+import requests
 
-# App title and description
-st.title("LoRa Sender")
-st.write("This app sends commands to a LoRa receiver device and displays responses.")
+def generate_connection_code():
+    """Generate a unique connection code for the receiver"""
+    # Generate a random token
+    token = secrets.token_hex(8)
+    # Add timestamp to ensure uniqueness
+    timestamp = int(time.time())
+    # Combine and hash
+    combined = f"{token}-{timestamp}"
+    code = hashlib.sha256(combined.encode()).hexdigest()[:12].upper()
+    # Format with dashes for readability
+    return f"{code[:4]}-{code[4:8]}-{code[8:12]}"
 
-# Function to autodiscover USB serial ports with details
-def get_available_ports():
-    ports = serial.tools.list_ports.comports()
-    port_list = [(port.device, port.description) for port in ports if port.device]
-    st.sidebar.write("Detected ports with descriptions:", {p[0]: p[1] for p in port_list})  # Debug output
-    return [port[0] for port in port_list]  # Return just the device names
-
-# Sidebar for configuration with autodiscovered ports
-with st.sidebar:
-    st.header("Device Configuration")
-    # Autodiscover and populate serial port dropdown
-    available_ports = get_available_ports()
-    st.sidebar.write("Available ports:", available_ports)  # Debug available ports
-    if 'serial_port' not in st.session_state:
-        st.session_state.serial_port = "COM3"  # Default value
-    if available_ports:
-        st.session_state.serial_port = st.selectbox("Serial Port", options=available_ports, index=0,
-                                                  help="Select the port connected to your RYLR998 (autodiscovered).")
-        st.sidebar.write("Selected port from dropdown:", st.session_state.serial_port)
-    else:
-        st.session_state.serial_port = st.text_input("Serial Port", value=st.session_state.serial_port,
-                                                   help="No ports autodiscovered. Manually enter port (e.g., COM3 on Windows).")
-        st.sidebar.write("Selected port from text input:", st.session_state.serial_port)
-    serial_port = st.session_state.serial_port  # Use session state value
-    baud_rate = st.selectbox("Baud Rate", options=[9600, 57600, 115200], index=2)
+def generate_encryption_key(connection_code, salt=None):
+    """Generate an encryption key from the connection code"""
+    if salt is None:
+        salt = os.urandom(16)
     
-    # LoRa specific settings
-    st.subheader("LoRa Settings")
-    address = st.number_input("Device Address", min_value=1, max_value=65535, value=1)
-    network_id = st.number_input("Network ID", min_value=0, max_value=16, value=0)
-    spreading_factor = st.selectbox("Spreading Factor", options=[7, 8, 9, 10, 11, 12], index=5)
-    bandwidth = st.selectbox("Bandwidth", options=["125 kHz", "250 kHz", "500 kHz"], index=0)
-    coding_rate = st.selectbox("Coding Rate", options=["4/5", "4/6", "4/7", "4/8"], index=0)
-    
-    # Convert bandwidth to parameter value
-    bandwidth_map = {"125 kHz": 7, "250 kHz": 8, "500 kHz": 9}
-    bandwidth_value = bandwidth_map[bandwidth]
-    
-    # Convert coding rate to parameter value
-    coding_rate_map = {"4/5": 1, "4/6": 2, "4/7": 3, "4/8": 4}
-    coding_rate_value = coding_rate_map[coding_rate]
+    # Derive key from connection code
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=100000,
+    )
+    key = base64.urlsafe_b64encode(kdf.derive(connection_code.encode()))
+    return key, salt
 
-# Function to initialize the LoRa module
-def initialize_lora():
-    try:
-        st.write(f"Attempting to open port: {serial_port}")  # Debug output
-        if not serial_port or serial_port == "[]":
-            st.error("Serial port is empty or invalid. Please select or enter a valid port.")
+def encrypt_message(message, key):
+    """Encrypt a message using the provided key"""
+    f = Fernet(key)
+    return f.encrypt(json.dumps(message).encode())
+
+def decrypt_message(encrypted_message, key):
+    """Decrypt a message using the provided key"""
+    f = Fernet(key)
+    decrypted = f.decrypt(encrypted_message)
+    return json.loads(decrypted.decode())
+
+def save_to_session(key, value):
+    """Save value to session state"""
+    st.session_state[key] = value
+
+def get_from_session(key, default=None):
+    """Get value from session state"""
+    return st.session_state.get(key, default)
+
+# Mock WAN server (in a real app, you'd use a proper database or message queue)
+class MockWANServer:
+    @staticmethod
+    def register_receiver(connection_code, salt, endpoint):
+        """Register a receiver with its connection code"""
+        # In a real app, this would be a server-side operation
+        st.session_state['wan_registry'] = st.session_state.get('wan_registry', {})
+        st.session_state['wan_registry'][connection_code] = {
+            'salt': salt,
+            'endpoint': endpoint,
+            'messages': []
+        }
+        return True
+    
+    @staticmethod
+    def send_message(connection_code, encrypted_message):
+        """Send an encrypted message to a receiver"""
+        # In a real app, this would push to a queue or database
+        registry = st.session_state.get('wan_registry', {})
+        if connection_code not in registry:
+            return False
+        
+        registry[connection_code]['messages'].append({
+            'message': encrypted_message,
+            'timestamp': time.time(),
+            'status': 'pending'
+        })
+        return True
+    
+    @staticmethod
+    def get_messages(connection_code):
+        """Get pending messages for a receiver"""
+        registry = st.session_state.get('wan_registry', {})
+        if connection_code not in registry:
+            return []
+        
+        messages = registry[connection_code]['messages']
+        # Filter pending messages
+        pending = [m for m in messages if m['status'] == 'pending']
+        # Mark as processing
+        for m in pending:
+            m['status'] = 'processing'
+        return pending
+    
+    @staticmethod
+    def update_message_status(connection_code, message_timestamp, status, response=None):
+        """Update message status and add response if any"""
+        registry = st.session_state.get('wan_registry', {})
+        if connection_code not in registry:
+            return False
+        
+        for message in registry[connection_code]['messages']:
+            if message['timestamp'] == message_timestamp:
+                message['status'] = status
+                if response:
+                    message['response'] = response
+                return True
+        return False
+    
+    @staticmethod
+    def get_response(connection_code, message_timestamp):
+        """Get response for a specific message"""
+        registry = st.session_state.get('wan_registry', {})
+        if connection_code not in registry:
             return None
-        ser = serial.Serial(serial_port, baudrate=baud_rate, timeout=1)
-        time.sleep(1)
         
-        # Reset module
-        ser.write(b"AT+RESET\r\n")
-        time.sleep(1)
-        response = ser.readline().decode().strip()
-        st.session_state.log.append(f"Reset: {response}")
-        
-        # Set address
-        ser.write(f"AT+ADDRESS={address}\r\n".encode())
-        time.sleep(0.5)
-        response = ser.readline().decode().strip()
-        st.session_state.log.append(f"Set Address: {response}")
-        
-        # Set network ID
-        ser.write(f"AT+NETWORKID={network_id}\r\n".encode())
-        time.sleep(0.5)
-        response = ser.readline().decode().strip()
-        st.session_state.log.append(f"Set Network ID: {response}")
-        
-        # Set parameters (SF, BW, CR, Preamble)
-        ser.write(f"AT+PARAMETER={spreading_factor},{bandwidth_value},{coding_rate_value},7\r\n".encode())
-        time.sleep(0.5)
-        response = ser.readline().decode().strip()
-        st.session_state.log.append(f"Set Parameters: {response}")
-        
-        # Get version info
-        ser.write(b"AT+VER\r\n")
-        time.sleep(0.5)
-        response = ser.readline().decode().strip()
-        st.session_state.log.append(f"Module Version: {response}")
-        
-        return ser
-    except Exception as e:
-        st.error(f"Failed to initialize: {str(e)}")
+        for message in registry[connection_code]['messages']:
+            if message['timestamp'] == message_timestamp and 'response' in message:
+                return message['response']
         return None
 
-# Function to send a message
-def send_message(ser, dest_addr, message):
-    command = f"AT+SEND={dest_addr},{len(message)},{message}\r\n"
-    ser.write(command.encode())
-    time.sleep(0.5)
-    response = ser.readline().decode().strip()
-    return response
+# Receiver App (save as receiver_app.py)
+import streamlit as st
+import time
+from utils import generate_connection_code, generate_encryption_key, decrypt_message, encrypt_message
+from utils import save_to_session, get_from_session, MockWANServer
 
-# Function to wait for and parse a response
-def wait_for_response(ser, timeout=30):
-    start_time = time.time()
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+def receiver_app():
+    st.title("Encrypted WAN Receiver")
     
-    while time.time() - start_time < timeout:
-        # Update progress bar
-        elapsed = time.time() - start_time
-        progress = min(elapsed / timeout, 1.0)
-        progress_bar.progress(progress)
-        status_text.text(f"Waiting for response... ({int(elapsed)}s / {timeout}s)")
+    # Initialize session state for the receiver
+    if 'receiver_initialized' not in st.session_state:
+        st.session_state['receiver_initialized'] = False
+        st.session_state['connection_code'] = generate_connection_code()
+        st.session_state['salt'] = os.urandom(16)
+        encryption_key, _ = generate_encryption_key(
+            st.session_state['connection_code'], 
+            st.session_state['salt']
+        )
+        st.session_state['encryption_key'] = encryption_key
         
-        if ser.in_waiting > 0:
-            data = ser.readline().decode().strip()
-            
-            # Check if it's a received message
-            if data.startswith("+RCV"):
-                progress_bar.progress(1.0)
-                status_text.text("Response received!")
-                
-                try:
-                    # Format: +RCV=<addr>,<length>,<data>,<rssi>,<snr>
-                    parts = data.split(",")
-                    src_addr = parts[0].split("=")[1]
-                    length = parts[1]
-                    message = ",".join(parts[2:-2])  # Join parts that may contain commas
-                    rssi = parts[-2]
-                    snr = parts[-1]
-                    
-                    return {
-                        "source": src_addr,
-                        "message": message,
-                        "rssi": rssi,
-                        "snr": snr
-                    }
-                except Exception as e:
-                    return {"error": f"Failed to parse response: {str(e)}"}
-            else:
-                # Other module output
-                st.session_state.log.append(f"Module: {data}")
-                
-        time.sleep(0.1)
+        # Register with the WAN server
+        MockWANServer.register_receiver(
+            st.session_state['connection_code'],
+            st.session_state['salt'],
+            "http://receiver-endpoint"  # In a real app, this would be a proper endpoint
+        )
+        st.session_state['receiver_initialized'] = True
     
-    progress_bar.progress(1.0)
-    status_text.text("Timeout: No response received.")
-    return None
-
-# Initialize session state
-if 'initialized' not in st.session_state:
-    st.session_state.initialized = False
-    st.session_state.log = []
-    st.session_state.receiver_addr = None
-    st.session_state.last_response = None
-
-# Main app layout
-tabs = st.tabs(["Connection", "Send Command", "Response", "Logs"])
-
-with tabs[0]:
-    col1, col2 = st.columns(2)
+    # Display connection code
+    st.header("Your Connection Code")
+    st.code(st.session_state['connection_code'], language=None)
+    st.info("Share this code with the sender to establish a secure connection.")
     
-    with col1:
-        st.subheader("Module Status")
-        status = "Disconnected"
-        if st.session_state.initialized:
-            status = "Connected"
-        st.write(f"Status: {status}")
-        
-        if not st.session_state.initialized:
-            if st.button("Connect to LoRa Module"):
-                ser = initialize_lora()
-                if ser:
-                    st.session_state.ser = ser
-                    st.session_state.initialized = True
-                    st.rerun()  # Updated to st.rerun()
-        else:
-            if st.button("Disconnect"):
-                st.session_state.ser.close()
-                st.session_state.initialized = False
-                st.session_state.receiver_addr = None
-                st.rerun()  # Updated to st.rerun()
+    # Custom instruction editor
+    st.header("Custom Instruction Configuration")
+    if 'custom_instructions' not in st.session_state:
+        st.session_state['custom_instructions'] = """
+def process_request(request_data):
+    # This function will be called when a request is received
+    # You can customize this to handle different types of requests
     
-    with col2:
-        st.subheader("Receiver Connection")
-        
-        receiver_code = st.text_input("Enter Receiver's Connection Code")
-        
-        if st.button("Connect to Receiver") and receiver_code:
+    if 'action' in request_data:
+        if request_data['action'] == 'echo':
+            return {'status': 'success', 'echo': request_data.get('message', '')}
+        elif request_data['action'] == 'calculate':
             try:
-                # Convert hex code to address
-                receiver_addr = int(receiver_code, 16)
-                st.session_state.receiver_addr = receiver_addr
-                st.success(f"Connected to receiver with address: {receiver_addr}")
-            except ValueError:
-                st.error("Invalid connection code. Please enter a valid hexadecimal code.")
-
-with tabs[1]:
-    st.subheader("Send Command")
+                expression = request_data.get('expression', '')
+                result = eval(expression)  # Note: eval can be dangerous in production
+                return {'status': 'success', 'result': result}
+            except Exception as e:
+                return {'status': 'error', 'message': str(e)}
     
-    if not st.session_state.initialized:
-        st.warning("Please connect to the LoRa module first.")
-    elif not st.session_state.receiver_addr:
-        st.warning("Please connect to a receiver first.")
-    else:
-        # Command selection
-        command_type = st.selectbox(
-            "Select Command Type",
-            ["Standard Commands", "Custom Command"]
+    return {'status': 'error', 'message': 'Unknown action or invalid request'}
+"""
+    
+    custom_code = st.text_area("Custom Request Handler", 
+                               st.session_state['custom_instructions'], 
+                               height=300)
+    
+    if st.button("Save Instructions"):
+        try:
+            # Validate the code by executing it
+            exec(custom_code)
+            st.session_state['custom_instructions'] = custom_code
+            st.success("Custom instructions saved successfully!")
+        except Exception as e:
+            st.error(f"Error in code: {str(e)}")
+    
+    # Request handling and status section
+    st.header("Request Monitor")
+    status_placeholder = st.empty()
+    
+    # Function to handle incoming requests
+    def check_and_process_requests():
+        messages = MockWANServer.get_messages(st.session_state['connection_code'])
+        
+        if not messages:
+            status_placeholder.info("Waiting for requests...")
+            return
+        
+        for message in messages:
+            try:
+                # Decrypt the message
+                encrypted_data = message['message']
+                decrypted_data = decrypt_message(encrypted_data, st.session_state['encryption_key'])
+                
+                status_placeholder.info(f"Processing request: {decrypted_data.get('id', 'unknown')}")
+                
+                # Execute the custom handler
+                local_vars = {}
+                exec(st.session_state['custom_instructions'], globals(), local_vars)
+                process_function = local_vars.get('process_request')
+                
+                if not process_function:
+                    result = {'status': 'error', 'message': 'No process_request function defined'}
+                else:
+                    result = process_function(decrypted_data)
+                
+                # Encrypt the response
+                encrypted_response = encrypt_message(result, st.session_state['encryption_key'])
+                
+                # Update message status
+                MockWANServer.update_message_status(
+                    st.session_state['connection_code'],
+                    message['timestamp'],
+                    'completed',
+                    encrypted_response
+                )
+                
+                status_placeholder.success(f"Request {decrypted_data.get('id', 'unknown')} processed: {result}")
+                
+            except Exception as e:
+                status_placeholder.error(f"Error processing request: {str(e)}")
+                MockWANServer.update_message_status(
+                    st.session_state['connection_code'],
+                    message['timestamp'],
+                    'error'
+                )
+    
+    # Check for requests every few seconds
+    if st.button("Check for Requests"):
+        check_and_process_requests()
+
+# Sender App (save as sender_app.py)
+import streamlit as st
+import time
+import uuid
+from utils import generate_encryption_key, encrypt_message, decrypt_message
+from utils import save_to_session, get_from_session, MockWANServer
+
+def sender_app():
+    st.title("Encrypted WAN Sender")
+    
+    # Connection setup
+    st.header("Connect to Receiver")
+    connection_code = st.text_input("Enter Connection Code (e.g., ABCD-1234-XYZ9)")
+    
+    if st.button("Connect") and connection_code:
+        # In a real app, you would verify the connection code with the server
+        if get_from_session('wan_registry', {}).get(connection_code):
+            # Get the salt from the registry
+            salt = get_from_session('wan_registry', {})[connection_code]['salt']
+            # Generate encryption key
+            encryption_key, _ = generate_encryption_key(connection_code, salt)
+            # Save to session
+            save_to_session('connected_to', connection_code)
+            save_to_session('encryption_key', encryption_key)
+            st.success(f"Connected to {connection_code}")
+        else:
+            st.error("Invalid connection code or receiver not available")
+    
+    # Only show request section if connected
+    if get_from_session('connected_to'):
+        st.header("Send Request")
+        
+        # Request type selector
+        request_type = st.selectbox(
+            "Request Type",
+            ["Echo Message", "Calculate Expression", "Custom Request"]
         )
         
-        if command_type == "Standard Commands":
-            standard_command = st.selectbox(
-                "Select Command",
-                ["Read Temperature", "Read Humidity", "Read BME280 Sensor", "Control GPIO"]
-            )
-            
-            # Set command details based on selection
-            if standard_command == "Read Temperature":
-                command_json = json.dumps({"command": "read", "sensor": "temperature"})
-            elif standard_command == "Read Humidity":
-                command_json = json.dumps({"command": "read", "sensor": "humidity"})
-            elif standard_command == "Read BME280 Sensor":
-                command_json = json.dumps({"command": "read", "sensor": "BME280"})
-            elif standard_command == "Control GPIO":
-                gpio_pin = st.number_input("GPIO Pin Number", min_value=0, max_value=40, value=13)
-                gpio_state = st.selectbox("Pin State", ["HIGH", "LOW"])
-                command_json = json.dumps({"command": "gpio", "pin": gpio_pin, "state": gpio_state})
-        else:
-            # Custom command JSON editor
-            st.write("Enter custom JSON command:")
-            command_json = st.text_area(
-                "Custom JSON",
-                value="""{"command": "custom", "param": "example", "value": "test"}""",
-                height=150
-            )
-            
-            # Validate JSON
+        request_data = {}
+        
+        if request_type == "Echo Message":
+            message = st.text_input("Message to Echo")
+            if message:
+                request_data = {
+                    'action': 'echo',
+                    'message': message
+                }
+        
+        elif request_type == "Calculate Expression":
+            expression = st.text_input("Enter Expression (e.g., 2 + 2 * 10)")
+            if expression:
+                request_data = {
+                    'action': 'calculate',
+                    'expression': expression
+                }
+        
+        elif request_type == "Custom Request":
+            custom_json = st.text_area("Enter Custom JSON Request", "{\"action\": \"custom\"}")
             try:
-                json.loads(command_json)
-                st.success("Valid JSON format")
-            except json.JSONDecodeError as e:
-                st.error(f"Invalid JSON: {str(e)}")
-        
-        # Send button
-        if st.button("Send Command"):
-            st.session_state.log.append(f"Sending to {st.session_state.receiver_addr}: {command_json}")
-            
-            # Send the command
-            result = send_message(st.session_state.ser, st.session_state.receiver_addr, command_json)
-            st.session_state.log.append(f"Send result: {result}")
-            
-            # Wait for response
-            with st.spinner("Waiting for response..."):
-                response = wait_for_response(st.session_state.ser)
-                
-                if response:
-                    st.session_state.log.append(f"Response received: {response}")
-                    st.session_state.last_response = response
-                    st.success("Response received! See the Response tab for details.")
-                else:
-                    st.error("No response received within the timeout period.")
-
-with tabs[2]:
-    st.subheader("Response")
-    
-    if st.session_state.last_response:
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.write("Response Details:")
-            st.write(f"Source Address: {st.session_state.last_response.get('source', 'N/A')}")
-            st.write(f"Signal Strength (RSSI): {st.session_state.last_response.get('rssi', 'N/A')} dBm")
-            st.write(f"Signal-to-Noise Ratio: {st.session_state.last_response.get('snr', 'N/A')} dB")
-        
-        with col2:
-            try:
-                # Try to parse the message as JSON
-                if 'message' in st.session_state.last_response:
-                    message_json = json.loads(st.session_state.last_response['message'])
-                    st.json(message_json)
+                request_data = json.loads(custom_json)
             except json.JSONDecodeError:
-                # If not JSON, show as plain text
-                if 'message' in st.session_state.last_response:
-                    st.code(st.session_state.last_response['message'])
-                else:
-                    st.write("No message content available")
-    else:
-        st.info("No response has been received yet. Send a command first.")
+                st.error("Invalid JSON format")
+        
+        if st.button("Send Request") and request_data:
+            # Add request ID and timestamp
+            request_data['id'] = str(uuid.uuid4())
+            request_data['timestamp'] = time.time()
+            
+            # Encrypt the request
+            encrypted_data = encrypt_message(
+                request_data, 
+                get_from_session('encryption_key')
+            )
+            
+            # Send via WAN server
+            if MockWANServer.send_message(
+                get_from_session('connected_to'), 
+                encrypted_data
+            ):
+                save_to_session('last_request_id', request_data['id'])
+                save_to_session('last_request_time', request_data['timestamp'])
+                st.success(f"Request sent! ID: {request_data['id']}")
+            else:
+                st.error("Failed to send request")
+        
+        # Response section
+        st.header("Response")
+        
+        if get_from_session('last_request_id') and st.button("Check for Response"):
+            connection_code = get_from_session('connected_to')
+            request_time = get_from_session('last_request_time')
+            
+            # Find the message
+            response = None
+            registry = get_from_session('wan_registry', {})
+            if connection_code in registry:
+                for msg in registry[connection_code]['messages']:
+                    if msg['timestamp'] == request_time and 'response' in msg:
+                        response = msg['response']
+                        break
+            
+            if response:
+                try:
+                    # Decrypt the response
+                    decrypted_response = decrypt_message(
+                        response, 
+                        get_from_session('encryption_key')
+                    )
+                    st.json(decrypted_response)
+                except Exception as e:
+                    st.error(f"Error decrypting response: {str(e)}")
+            else:
+                st.info("No response yet or request still processing")
 
-with tabs[3]:
-    st.subheader("Communication Logs")
+# Main App (save as app.py)
+import streamlit as st
+from receiver_app import receiver_app
+from sender_app import sender_app
+
+def main():
+    st.set_page_config(page_title="Encrypted WAN Communication", layout="wide")
     
-    # Display logs in reverse order (newest first)
-    for log_entry in reversed(st.session_state.log):
-        st.text(log_entry)
+    # Initialize session state
+    if 'wan_registry' not in st.session_state:
+        st.session_state['wan_registry'] = {}
     
-    if st.button("Clear Logs"):
-        st.session_state.log = []
-        st.rerun()  # Updated to st.rerun()
+    # App selection
+    app_mode = st.sidebar.radio("Select App Mode", ["Sender", "Receiver"])
+    
+    if app_mode == "Sender":
+        sender_app()
+    else:
+        receiver_app()
+
+if __name__ == "__main__":
+    main()
