@@ -1,5 +1,6 @@
 import streamlit as st
 import serial
+import serial.tools.list_ports
 import time
 import json
 import threading
@@ -8,11 +9,26 @@ import threading
 st.title("LoRa Sender")
 st.write("This app sends commands to a LoRa receiver device and displays responses.")
 
-# Sidebar for configuration
+# Function to autodiscover USB serial ports
+def get_available_ports():
+    ports = serial.tools.list_ports.comports()
+    port_list = [port.device for port in ports if port.device]
+    st.sidebar.write("Detected ports:", port_list)  # Debug output
+    return port_list
+
+# Sidebar for configuration with autodiscovered ports
 with st.sidebar:
     st.header("Device Configuration")
-    serial_port = st.text_input("Serial Port", value="/dev/ttyUSB0", 
-                               help="Example: COM3 (Windows) or /dev/ttyUSB0 (Linux/Mac)")
+    # Autodiscover and populate serial port dropdown
+    available_ports = get_available_ports()
+    if available_ports:
+        serial_port = st.selectbox("Serial Port", options=available_ports, index=0,
+                                  help="Select the port connected to your RYLR998 (autodiscovered).")
+    else:
+        # Default to COM3 for Windows if no ports are detected
+        serial_port = st.text_input("Serial Port", value="COM3",
+                                   help="No ports autodiscovered. Manually enter port (e.g., COM3 on Windows).")
+    
     baud_rate = st.selectbox("Baud Rate", options=[9600, 57600, 115200], index=2)
     
     # LoRa specific settings
@@ -34,6 +50,7 @@ with st.sidebar:
 # Function to initialize the LoRa module
 def initialize_lora():
     try:
+        st.write(f"Attempting to open port: {serial_port}")  # Debug output
         ser = serial.Serial(serial_port, baudrate=baud_rate, timeout=1)
         time.sleep(1)
         
