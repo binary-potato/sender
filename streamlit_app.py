@@ -22,14 +22,17 @@ with st.sidebar:
     # Autodiscover and populate serial port dropdown
     available_ports = get_available_ports()
     st.sidebar.write("Available ports:", available_ports)  # Debug available ports
+    if 'serial_port' not in st.session_state:
+        st.session_state.serial_port = "COM3"  # Default value
     if available_ports:
-        serial_port = st.selectbox("Serial Port", options=available_ports, index=0,
-                                  help="Select the port connected to your RYLR998 (autodiscovered).")
-        st.sidebar.write("Selected port from dropdown:", serial_port)  # Debug selected port
+        st.session_state.serial_port = st.selectbox("Serial Port", options=available_ports, index=0,
+                                                  help="Select the port connected to your RYLR998 (autodiscovered).")
+        st.sidebar.write("Selected port from dropdown:", st.session_state.serial_port)
     else:
-        serial_port = st.text_input("Serial Port", value="COM3",
-                                   help="No ports autodiscovered. Manually enter port (e.g., COM3 on Windows).")
-        st.sidebar.write("Selected port from text input:", serial_port)  # Debug text input
+        st.session_state.serial_port = st.text_input("Serial Port", value=st.session_state.serial_port,
+                                                   help="No ports autodiscovered. Manually enter port (e.g., COM3 on Windows).")
+        st.sidebar.write("Selected port from text input:", st.session_state.serial_port)
+    serial_port = st.session_state.serial_port  # Use session state value
     baud_rate = st.selectbox("Baud Rate", options=[9600, 57600, 115200], index=2)
     
     # LoRa specific settings
@@ -175,13 +178,13 @@ with tabs[0]:
                 if ser:
                     st.session_state.ser = ser
                     st.session_state.initialized = True
-                    st.experimental_rerun()
+                    st.rerun()  # Updated to st.rerun()
         else:
             if st.button("Disconnect"):
                 st.session_state.ser.close()
                 st.session_state.initialized = False
                 st.session_state.receiver_addr = None
-                st.experimental_rerun()
+                st.rerun()  # Updated to st.rerun()
     
     with col2:
         st.subheader("Receiver Connection")
@@ -299,4 +302,4 @@ with tabs[3]:
     
     if st.button("Clear Logs"):
         st.session_state.log = []
-        st.experimental_rerun()
+        st.rerun()  # Updated to st.rerun()
