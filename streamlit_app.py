@@ -9,26 +9,27 @@ import threading
 st.title("LoRa Sender")
 st.write("This app sends commands to a LoRa receiver device and displays responses.")
 
-# Function to autodiscover USB serial ports
+# Function to autodiscover USB serial ports with details
 def get_available_ports():
     ports = serial.tools.list_ports.comports()
-    port_list = [port.device for port in ports if port.device]
-    st.sidebar.write("Detected ports:", port_list)  # Debug output
-    return port_list
+    port_list = [(port.device, port.description) for port in ports if port.device]
+    st.sidebar.write("Detected ports with descriptions:", {p[0]: p[1] for p in port_list})  # Debug output
+    return [port[0] for port in port_list]  # Return just the device names
 
 # Sidebar for configuration with autodiscovered ports
 with st.sidebar:
     st.header("Device Configuration")
     # Autodiscover and populate serial port dropdown
     available_ports = get_available_ports()
+    st.sidebar.write("Available ports:", available_ports)  # Debug available ports
     if available_ports:
         serial_port = st.selectbox("Serial Port", options=available_ports, index=0,
                                   help="Select the port connected to your RYLR998 (autodiscovered).")
+        st.sidebar.write("Selected port from dropdown:", serial_port)  # Debug selected port
     else:
-        # Default to COM3 for Windows if no ports are detected
         serial_port = st.text_input("Serial Port", value="COM3",
                                    help="No ports autodiscovered. Manually enter port (e.g., COM3 on Windows).")
-    
+        st.sidebar.write("Selected port from text input:", serial_port)  # Debug text input
     baud_rate = st.selectbox("Baud Rate", options=[9600, 57600, 115200], index=2)
     
     # LoRa specific settings
@@ -51,6 +52,9 @@ with st.sidebar:
 def initialize_lora():
     try:
         st.write(f"Attempting to open port: {serial_port}")  # Debug output
+        if not serial_port or serial_port == "[]":
+            st.error("Serial port is empty or invalid. Please select or enter a valid port.")
+            return None
         ser = serial.Serial(serial_port, baudrate=baud_rate, timeout=1)
         time.sleep(1)
         
