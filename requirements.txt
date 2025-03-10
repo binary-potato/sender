@@ -1,4 +1,9 @@
-streamlit>=1.22.0
-cryptography>=39.0.0
-requests>=2.28.0
-python-dotenv>=0.21.0
+streamlit
+socket
+threading
+json
+time
+hashlib
+base64
+uuid
+requests
