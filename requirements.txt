@@ -1,9 +1,6 @@
-streamlit
-socket
-threading
-json
-time
-hashlib
-base64
-uuid
-requests
+streamlit>=1.22.0
+cryptography>=39.0.0
+requests>=2.28.0
+uuid>=1.30
+qrcode>=7.3.1
+Pillow>=9.0.0
