@@ -1,18 +1,16 @@
 import streamlit as st
-import socket
-import threading
 import json
 import time
 import uuid
 import base64
 import hashlib
+import requests
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-import requests
 import qrcode
 from io import BytesIO
-import PIL.Image
+import os
 
 # Set page config
 st.set_page_config(page_title="WAN Communication Tool", layout="wide")
@@ -31,6 +29,12 @@ if 'sent_requests' not in st.session_state:
 if 'responses' not in st.session_state:
     st.session_state.responses = []
 
+# Firebase config - you'll need to create a Firebase Realtime Database
+# and put your credentials here
+FIREBASE_URL = "https://your-firebase-project.firebaseio.com"  # Replace with your Firebase URL
+# If you have a Firebase API key (for some operations)
+FIREBASE_API_KEY = ""  # Optional
+
 # Helper functions for encryption
 def generate_key(passphrase, salt):
     """Generate a Fernet key from a passphrase and salt."""
@@ -46,107 +50,134 @@ def generate_key(passphrase, salt):
 def encrypt_message(message, key):
     """Encrypt a message using Fernet symmetric encryption."""
     f = Fernet(key)
-    encrypted_message = f.encrypt(message.encode())
-    return encrypted_message
+    encrypted_message = f.encrypt(json.dumps(message).encode())
+    return base64.b64encode(encrypted_message).decode()
 
 def decrypt_message(encrypted_message, key):
     """Decrypt a message using Fernet symmetric encryption."""
     f = Fernet(key)
-    decrypted_message = f.decrypt(encrypted_message).decode()
-    return decrypted_message
+    decrypted_message = f.decrypt(base64.b64decode(encrypted_message))
+    return json.loads(decrypted_message.decode())
 
 def generate_connection_code():
     """Generate a unique connection code."""
-    # Use a combination of UUID and timestamp for uniqueness
     unique_id = str(uuid.uuid4())
     timestamp = str(int(time.time()))
-    # Create a hash of the combination
     code_hash = hashlib.sha256((unique_id + timestamp).encode()).hexdigest()
-    # Return a shortened version (first 12 characters)
     return code_hash[:12]
 
-# Simplified API simulation for WAN communication
-# In a real implementation, you would use a proper server or peer-to-peer solution
-class WanCommunication:
-    def __init__(self):
-        self.active_connections = {}
-        self.messages = {}
+# Firebase-based WAN Communication
+class FirebaseWanCommunication:
+    def __init__(self, firebase_url):
+        self.firebase_url = firebase_url
         
-    def register_receiver(self, connection_code, encryption_key):
+    def _make_request(self, method, path, data=None):
+        """Make a request to Firebase."""
+        url = f"{self.firebase_url}/{path}.json"
+        
+        try:
+            if method == "GET":
+                response = requests.get(url)
+            elif method == "PUT":
+                response = requests.put(url, json=data)
+            elif method == "POST":
+                response = requests.post(url, json=data)
+            elif method == "PATCH":
+                response = requests.patch(url, json=data)
+            elif method == "DELETE":
+                response = requests.delete(url)
+                
+            if response.status_code in (200, 201, 204):
+                return response.json() if response.content else None
+            return None
+        except Exception as e:
+            st.error(f"Firebase request error: {str(e)}")
+            return None
+        
+    def register_receiver(self, connection_code, encryption_key_info):
         """Register a new receiver with a connection code."""
-        self.active_connections[connection_code] = {
-            "encryption_key": encryption_key,
-            "requests": [],
-            "responses": []
+        data = {
+            "active": True,
+            "created_at": int(time.time()),
+            "last_active": int(time.time()),
+            "encryption_info": encryption_key_info
         }
-        return True
+        result = self._make_request("PUT", f"connections/{connection_code}", data)
+        return result is not None
         
     def deregister_receiver(self, connection_code):
         """Remove a receiver connection."""
-        if connection_code in self.active_connections:
-            del self.active_connections[connection_code]
-            return True
-        return False
+        result = self._make_request("DELETE", f"connections/{connection_code}")
+        return result is not None
     
     def check_connection(self, connection_code):
         """Check if a connection code is active."""
-        return connection_code in self.active_connections
+        result = self._make_request("GET", f"connections/{connection_code}/active")
+        return result is True
     
-    def send_request(self, connection_code, request, sender_key):
+    def update_last_active(self, connection_code):
+        """Update the last active timestamp."""
+        data = {"last_active": int(time.time())}
+        self._make_request("PATCH", f"connections/{connection_code}", data)
+    
+    def send_request(self, connection_code, request, encrypted=False):
         """Send a request from sender to receiver."""
+        # Check if connection exists
         if not self.check_connection(connection_code):
             return False, "Connection not found"
         
-        # In a real implementation, you would encrypt the request here
         request_id = str(uuid.uuid4())
-        encrypted_request = request  # Simplified - would actually encrypt here
-        
-        self.active_connections[connection_code]["requests"].append({
+        request_data = {
             "id": request_id,
-            "data": encrypted_request,
+            "data": request,
+            "encrypted": encrypted,
+            "timestamp": int(time.time()),
             "processed": False
-        })
-        return True, request_id
+        }
+        
+        result = self._make_request("PUT", f"connections/{connection_code}/requests/{request_id}", request_data)
+        return result is not None, request_id
     
     def get_pending_requests(self, connection_code):
         """Get all pending requests for a receiver."""
-        if not self.check_connection(connection_code):
+        requests = self._make_request("GET", f"connections/{connection_code}/requests")
+        if not requests:
             return []
         
-        pending = [r for r in self.active_connections[connection_code]["requests"] if not r["processed"]]
-        # Mark as processed
-        for req in self.active_connections[connection_code]["requests"]:
-            if not req["processed"]:
-                req["processed"] = True
+        pending = []
+        for req_id, req_data in requests.items():
+            if not req_data.get("processed", False):
+                # Mark as processed
+                self._make_request("PATCH", f"connections/{connection_code}/requests/{req_id}", {"processed": True})
+                req_data["id"] = req_id  # Add the ID to the data
+                pending.append(req_data)
                 
         return pending
     
-    def send_response(self, connection_code, request_id, response):
+    def send_response(self, connection_code, request_id, response, encrypted=False):
         """Send a response from receiver to sender."""
-        if not self.check_connection(connection_code):
-            return False
-        
-        self.active_connections[connection_code]["responses"].append({
-            "request_id": request_id,
+        response_data = {
             "data": response,
+            "encrypted": encrypted,
+            "timestamp": int(time.time()),
             "retrieved": False
-        })
-        return True
+        }
+        
+        result = self._make_request("PUT", f"connections/{connection_code}/responses/{request_id}", response_data)
+        return result is not None
     
     def get_response(self, connection_code, request_id):
         """Get a response for a specific request."""
-        if not self.check_connection(connection_code):
+        response = self._make_request("GET", f"connections/{connection_code}/responses/{request_id}")
+        if not response or response.get("retrieved", False):
             return None
         
-        responses = self.active_connections[connection_code]["responses"]
-        for resp in responses:
-            if resp["request_id"] == request_id and not resp["retrieved"]:
-                resp["retrieved"] = True
-                return resp["data"]
-        return None
+        # Mark as retrieved
+        self._make_request("PATCH", f"connections/{connection_code}/responses/{request_id}", {"retrieved": True})
+        return response.get("data")
 
-# Create a global instance of WanCommunication (in a real app, this would be a server)
-wan_comm = WanCommunication()
+# Create a global instance of WanCommunication
+wan_comm = FirebaseWanCommunication(FIREBASE_URL)
 
 # Main app
 st.title("WAN Secure Communication")
@@ -165,13 +196,18 @@ with tab1:
             connection_code = generate_connection_code()
             st.session_state.connection_code = connection_code
             
-            # Generate a unique encryption key (would be more complex in a real implementation)
-            salt = b"static_salt_for_demo"  # In a real app, use a secure random salt
-            encryption_key = generate_key(connection_code, salt)
+            # Generate a unique encryption key
+            salt = os.urandom(16)  # Use a secure random salt
+            salt_b64 = base64.b64encode(salt).decode()
+            encryption_key_info = {"salt": salt_b64}
             
             # Register this receiver
-            wan_comm.register_receiver(connection_code, encryption_key)
-            st.session_state.receiver_active = True
+            if wan_comm.register_receiver(connection_code, encryption_key_info):
+                st.session_state.receiver_active = True
+                st.success("Connection code generated!")
+                st.experimental_rerun()
+            else:
+                st.error("Failed to establish connection. Please check your internet connection.")
             
     else:
         col1, col2 = st.columns([3, 1])
@@ -180,13 +216,16 @@ with tab1:
             st.success(f"Your connection code: **{st.session_state.connection_code}**")
             st.write("Share this code with anyone who needs to send you requests.")
             
+            # Keep the connection alive
+            wan_comm.update_last_active(st.session_state.connection_code)
+            
             # Option to deactivate
             if st.button("Deactivate Receiver"):
                 wan_comm.deregister_receiver(st.session_state.connection_code)
                 st.session_state.receiver_active = False
                 st.session_state.connection_code = ""
                 st.session_state.received_requests = []
-                st.rerun()
+                st.experimental_rerun()
         
         with col2:
             # Generate QR code for easy sharing
@@ -292,11 +331,8 @@ with tab2:
             if connection_code and wan_comm.check_connection(connection_code):
                 st.session_state.connection_code = connection_code
                 st.session_state.sender_connected = True
-                # Generate the same encryption key (would be more complex in real implementation)
-                salt = b"static_salt_for_demo"  # Must match receiver
-                encryption_key = generate_key(connection_code, salt)
                 st.success("Connected successfully!")
-                st.rerun()
+                st.experimental_rerun()
             else:
                 st.error("Invalid connection code or receiver not active")
     
@@ -309,7 +345,7 @@ with tab2:
             st.session_state.connection_code = ""
             st.session_state.sent_requests = []
             st.session_state.responses = []
-            st.rerun()
+            st.experimental_rerun()
         
         # Create a new request
         st.subheader("Send Request")
@@ -347,8 +383,7 @@ with tab2:
             if request_data:
                 success, request_id = wan_comm.send_request(
                     st.session_state.connection_code,
-                    request_data,
-                    None  # Simplified - would normally include an encryption key
+                    request_data
                 )
                 
                 if success:
