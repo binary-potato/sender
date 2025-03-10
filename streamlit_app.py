@@ -3,204 +3,412 @@ import socket
 import threading
 import json
 import time
-import hashlib
-import base64
 import uuid
-import requests
+import base64
+import hashlib
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+import requests
+import qrcode
+from io import BytesIO
+import PIL.Image
 
-# Initialize session state variables if they don't exist
-if 'connection_id' not in st.session_state:
-    st.session_state.connection_id = ""
-if 'encryption_key' not in st.session_state:
-    st.session_state.encryption_key = None
-if 'receiver_address' not in st.session_state:
-    st.session_state.receiver_address = ""
+# Set page config
+st.set_page_config(page_title="WAN Communication Tool", layout="wide")
+
+# Initialize session states if they don't exist
+if 'connection_code' not in st.session_state:
+    st.session_state.connection_code = ""
+if 'receiver_active' not in st.session_state:
+    st.session_state.receiver_active = False
+if 'sender_connected' not in st.session_state:
+    st.session_state.sender_connected = False
+if 'received_requests' not in st.session_state:
+    st.session_state.received_requests = []
+if 'sent_requests' not in st.session_state:
+    st.session_state.sent_requests = []
 if 'responses' not in st.session_state:
     st.session_state.responses = []
 
-def generate_key(passcode):
-    """Generate a Fernet key from a passcode."""
-    salt = b'static_salt_for_key_derivation'  # In production, use a secure random salt
+# Helper functions for encryption
+def generate_key(passphrase, salt):
+    """Generate a Fernet key from a passphrase and salt."""
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
         salt=salt,
         iterations=100000,
     )
-    key = base64.urlsafe_b64encode(kdf.derive(passcode.encode()))
+    key = base64.urlsafe_b64encode(kdf.derive(passphrase.encode()))
     return key
 
 def encrypt_message(message, key):
     """Encrypt a message using Fernet symmetric encryption."""
     f = Fernet(key)
-    return f.encrypt(json.dumps(message).encode()).decode()
+    encrypted_message = f.encrypt(message.encode())
+    return encrypted_message
 
 def decrypt_message(encrypted_message, key):
     """Decrypt a message using Fernet symmetric encryption."""
     f = Fernet(key)
-    decrypted = f.decrypt(encrypted_message.encode())
-    return json.loads(decrypted.decode())
+    decrypted_message = f.decrypt(encrypted_message).decode()
+    return decrypted_message
 
-def send_request(request_type, data, receiver_address, connection_id, encryption_key):
-    """Send an encrypted request to the receiver and get the response."""
-    try:
-        payload = {
-            "connection_id": connection_id,
-            "request_type": request_type,
-            "data": data,
-            "timestamp": time.time()
+def generate_connection_code():
+    """Generate a unique connection code."""
+    # Use a combination of UUID and timestamp for uniqueness
+    unique_id = str(uuid.uuid4())
+    timestamp = str(int(time.time()))
+    # Create a hash of the combination
+    code_hash = hashlib.sha256((unique_id + timestamp).encode()).hexdigest()
+    # Return a shortened version (first 12 characters)
+    return code_hash[:12]
+
+# Simplified API simulation for WAN communication
+# In a real implementation, you would use a proper server or peer-to-peer solution
+class WanCommunication:
+    def __init__(self):
+        self.active_connections = {}
+        self.messages = {}
+        
+    def register_receiver(self, connection_code, encryption_key):
+        """Register a new receiver with a connection code."""
+        self.active_connections[connection_code] = {
+            "encryption_key": encryption_key,
+            "requests": [],
+            "responses": []
         }
+        return True
         
-        encrypted_payload = encrypt_message(payload, encryption_key)
+    def deregister_receiver(self, connection_code):
+        """Remove a receiver connection."""
+        if connection_code in self.active_connections:
+            del self.active_connections[connection_code]
+            return True
+        return False
+    
+    def check_connection(self, connection_code):
+        """Check if a connection code is active."""
+        return connection_code in self.active_connections
+    
+    def send_request(self, connection_code, request, sender_key):
+        """Send a request from sender to receiver."""
+        if not self.check_connection(connection_code):
+            return False, "Connection not found"
         
-        response = requests.post(
-            f"{receiver_address}/api/request",
-            json={"encrypted_payload": encrypted_payload}
+        # In a real implementation, you would encrypt the request here
+        request_id = str(uuid.uuid4())
+        encrypted_request = request  # Simplified - would actually encrypt here
+        
+        self.active_connections[connection_code]["requests"].append({
+            "id": request_id,
+            "data": encrypted_request,
+            "processed": False
+        })
+        return True, request_id
+    
+    def get_pending_requests(self, connection_code):
+        """Get all pending requests for a receiver."""
+        if not self.check_connection(connection_code):
+            return []
+        
+        pending = [r for r in self.active_connections[connection_code]["requests"] if not r["processed"]]
+        # Mark as processed
+        for req in self.active_connections[connection_code]["requests"]:
+            if not req["processed"]:
+                req["processed"] = True
+                
+        return pending
+    
+    def send_response(self, connection_code, request_id, response):
+        """Send a response from receiver to sender."""
+        if not self.check_connection(connection_code):
+            return False
+        
+        self.active_connections[connection_code]["responses"].append({
+            "request_id": request_id,
+            "data": response,
+            "retrieved": False
+        })
+        return True
+    
+    def get_response(self, connection_code, request_id):
+        """Get a response for a specific request."""
+        if not self.check_connection(connection_code):
+            return None
+        
+        responses = self.active_connections[connection_code]["responses"]
+        for resp in responses:
+            if resp["request_id"] == request_id and not resp["retrieved"]:
+                resp["retrieved"] = True
+                return resp["data"]
+        return None
+
+# Create a global instance of WanCommunication (in a real app, this would be a server)
+wan_comm = WanCommunication()
+
+# Main app
+st.title("WAN Secure Communication")
+
+# Create tabs for Sender and Receiver modes
+tab1, tab2 = st.tabs(["Receiver Mode", "Sender Mode"])
+
+# Receiver Mode
+with tab1:
+    st.header("Receiver Mode")
+    
+    if not st.session_state.receiver_active:
+        st.write("Generate a connection code to allow senders to connect securely.")
+        if st.button("Generate Connection Code"):
+            # Generate a unique connection code
+            connection_code = generate_connection_code()
+            st.session_state.connection_code = connection_code
+            
+            # Generate a unique encryption key (would be more complex in a real implementation)
+            salt = b"static_salt_for_demo"  # In a real app, use a secure random salt
+            encryption_key = generate_key(connection_code, salt)
+            
+            # Register this receiver
+            wan_comm.register_receiver(connection_code, encryption_key)
+            st.session_state.receiver_active = True
+            
+    else:
+        col1, col2 = st.columns([3, 1])
+        
+        with col1:
+            st.success(f"Your connection code: **{st.session_state.connection_code}**")
+            st.write("Share this code with anyone who needs to send you requests.")
+            
+            # Option to deactivate
+            if st.button("Deactivate Receiver"):
+                wan_comm.deregister_receiver(st.session_state.connection_code)
+                st.session_state.receiver_active = False
+                st.session_state.connection_code = ""
+                st.session_state.received_requests = []
+                st.rerun()
+        
+        with col2:
+            # Generate QR code for easy sharing
+            qr = qrcode.QRCode(
+                version=1,
+                error_correction=qrcode.constants.ERROR_CORRECT_L,
+                box_size=10,
+                border=4,
+            )
+            qr.add_data(st.session_state.connection_code)
+            qr.make(fit=True)
+            
+            img = qr.make_image(fill_color="black", back_color="white")
+            buffered = BytesIO()
+            img.save(buffered, format="PNG")
+            st.image(buffered, caption="Scan to copy code", width=150)
+        
+        # Custom request handling code
+        st.subheader("Custom Request Handler")
+        custom_handler = st.text_area(
+            "Define how to process incoming requests (Python code):",
+            height=150,
+            value="""# Example handler:
+# 'request' variable contains the incoming request
+# Return your result as the response
+
+if "echo" in request:
+    response = f"Echo: {request['message']}"
+elif "calculate" in request:
+    x = request.get('x', 0)
+    y = request.get('y', 0)
+    operation = request.get('operation', 'add')
+    
+    if operation == 'add':
+        result = x + y
+    elif operation == 'subtract':
+        result = x - y
+    elif operation == 'multiply':
+        result = x * y
+    elif operation == 'divide':
+        result = x / y if y != 0 else 'Error: Division by zero'
+    
+    response = f"Result: {result}"
+else:
+    response = "Unknown request type"
+"""
         )
         
-        if response.status_code == 200:
-            encrypted_response = response.json().get("encrypted_response")
-            decrypted_response = decrypt_message(encrypted_response, encryption_key)
-            return True, decrypted_response
-        else:
-            return False, f"Error: {response.status_code} - {response.text}"
-    except Exception as e:
-        return False, f"Error: {str(e)}"
-
-def main():
-    st.title("Secure WAN Communication App")
-    
-    tabs = st.tabs(["Connection Setup", "Send Requests", "Response History"])
-    
-    with tabs[0]:
-        st.header("Connection Setup")
-        
-        st.subheader("Create New Connection")
-        if st.button("Generate New Connection ID"):
-            new_connection_id = str(uuid.uuid4())
-            new_passcode = hashlib.sha256(str(time.time()).encode()).hexdigest()[:12]
-            st.session_state.connection_id = new_connection_id
-            st.session_state.encryption_key = generate_key(new_passcode)
+        # Check for new requests
+        if st.button("Check for Requests"):
+            # Poll for new requests
+            pending_requests = wan_comm.get_pending_requests(st.session_state.connection_code)
             
-            st.success("New connection created!")
-            st.code(f"Connection ID: {new_connection_id}")
-            st.code(f"Passcode: {new_passcode}")
-            st.info("Share these details with the receiver app")
+            if pending_requests:
+                for req in pending_requests:
+                    st.session_state.received_requests.append(req)
+                st.success(f"Received {len(pending_requests)} new request(s)")
+            else:
+                st.info("No new requests")
         
-        st.divider()
+        # Display and process received requests
+        if st.session_state.received_requests:
+            st.subheader("Received Requests")
+            for i, req in enumerate(st.session_state.received_requests):
+                with st.expander(f"Request {i+1} (ID: {req['id'][:8]}...)"):
+                    st.write("Request Data:")
+                    st.json(req["data"])
+                    
+                    if st.button(f"Process Request {i+1}", key=f"process_{i}"):
+                        try:
+                            # Create a safe execution environment
+                            request = req["data"]  # The request data
+                            response = None  # Will be set by the handler code
+                            
+                            # Execute the custom handler code
+                            exec(custom_handler)
+                            
+                            # Send the response
+                            if response is not None:
+                                success = wan_comm.send_response(
+                                    st.session_state.connection_code,
+                                    req["id"],
+                                    response
+                                )
+                                if success:
+                                    st.success("Response sent successfully")
+                                else:
+                                    st.error("Failed to send response")
+                            else:
+                                st.warning("No response generated by handler")
+                        except Exception as e:
+                            st.error(f"Error processing request: {str(e)}")
+
+# Sender Mode
+with tab2:
+    st.header("Sender Mode")
+    
+    # Connect to a receiver
+    if not st.session_state.sender_connected:
+        connection_code = st.text_input("Enter connection code from receiver")
         
-        st.subheader("Enter Receiver Connection Details")
-        connection_id = st.text_input("Connection ID", value=st.session_state.connection_id)
-        passcode = st.text_input("Passcode", type="password")
-        receiver_address = st.text_input("Receiver Address (e.g., http://receiver-ip:8501)", 
-                                         value=st.session_state.receiver_address)
+        if st.button("Connect"):
+            if connection_code and wan_comm.check_connection(connection_code):
+                st.session_state.connection_code = connection_code
+                st.session_state.sender_connected = True
+                # Generate the same encryption key (would be more complex in real implementation)
+                salt = b"static_salt_for_demo"  # Must match receiver
+                encryption_key = generate_key(connection_code, salt)
+                st.success("Connected successfully!")
+                st.rerun()
+            else:
+                st.error("Invalid connection code or receiver not active")
+    
+    else:
+        st.success(f"Connected to: {st.session_state.connection_code}")
         
-        if st.button("Connect to Receiver"):
-            if connection_id and passcode and receiver_address:
-                st.session_state.connection_id = connection_id
-                st.session_state.encryption_key = generate_key(passcode)
-                st.session_state.receiver_address = receiver_address
-                
-                # Test connection
-                success, response = send_request(
-                    "connection_test", 
-                    {"message": "Hello from sender"}, 
-                    receiver_address,
-                    connection_id,
-                    st.session_state.encryption_key
+        # Option to disconnect
+        if st.button("Disconnect"):
+            st.session_state.sender_connected = False
+            st.session_state.connection_code = ""
+            st.session_state.sent_requests = []
+            st.session_state.responses = []
+            st.rerun()
+        
+        # Create a new request
+        st.subheader("Send Request")
+        
+        request_type = st.selectbox("Request Type", ["Echo", "Calculate"])
+        
+        request_data = {}
+        
+        if request_type == "Echo":
+            message = st.text_input("Message to echo")
+            if message:
+                request_data = {
+                    "echo": True,
+                    "message": message
+                }
+        
+        elif request_type == "Calculate":
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                x = st.number_input("X", value=0.0)
+            with col2:
+                operation = st.selectbox("Operation", ["add", "subtract", "multiply", "divide"])
+            with col3:
+                y = st.number_input("Y", value=0.0)
+            
+            request_data = {
+                "calculate": True,
+                "x": x,
+                "y": y,
+                "operation": operation
+            }
+        
+        # Send the request
+        if st.button("Send Request"):
+            if request_data:
+                success, request_id = wan_comm.send_request(
+                    st.session_state.connection_code,
+                    request_data,
+                    None  # Simplified - would normally include an encryption key
                 )
                 
                 if success:
-                    st.success(f"Connection successful! Receiver says: {response.get('message', 'No message')}")
+                    st.session_state.sent_requests.append({
+                        "id": request_id,
+                        "data": request_data,
+                        "timestamp": time.time()
+                    })
+                    st.success("Request sent successfully!")
                 else:
-                    st.error(f"Connection failed: {response}")
+                    st.error(f"Failed to send request: {request_id}")
             else:
-                st.warning("Please fill in all connection details")
-    
-    with tabs[1]:
-        st.header("Send Requests")
+                st.warning("Please complete the request form")
         
-        if not st.session_state.connection_id or not st.session_state.encryption_key or not st.session_state.receiver_address:
-            st.warning("Please set up connection details first")
-        else:
-            st.info(f"Connected to: {st.session_state.receiver_address}")
-            st.info(f"Connection ID: {st.session_state.connection_id}")
+        # Check for responses
+        if st.button("Check for Responses"):
+            new_responses = 0
+            for req in st.session_state.sent_requests:
+                response = wan_comm.get_response(st.session_state.connection_code, req["id"])
+                if response:
+                    st.session_state.responses.append({
+                        "request_id": req["id"],
+                        "request_data": req["data"],
+                        "response": response,
+                        "timestamp": time.time()
+                    })
+                    new_responses += 1
             
-            request_type = st.selectbox(
-                "Request Type",
-                ["text_message", "file_request", "data_processing", "custom_action"]
-            )
-            
-            if request_type == "text_message":
-                message = st.text_area("Message")
-                data = {"message": message}
-            elif request_type == "file_request":
-                file_path = st.text_input("File Path")
-                data = {"file_path": file_path}
-            elif request_type == "data_processing":
-                input_data = st.text_area("Data to Process (JSON)")
-                processing_type = st.selectbox("Processing Type", ["summarize", "analyze", "transform"])
-                try:
-                    data = {
-                        "input": json.loads(input_data) if input_data else {},
-                        "processing_type": processing_type
-                    }
-                except json.JSONDecodeError:
-                    st.error("Invalid JSON format")
-                    data = None
-            elif request_type == "custom_action":
-                action_name = st.text_input("Action Name")
-                parameters = st.text_area("Parameters (JSON)")
-                try:
-                    data = {
-                        "action": action_name,
-                        "parameters": json.loads(parameters) if parameters else {}
-                    }
-                except json.JSONDecodeError:
-                    st.error("Invalid JSON format")
-                    data = None
-            
-            if st.button("Send Request"):
-                if data:
-                    with st.spinner("Sending request..."):
-                        success, response = send_request(
-                            request_type,
-                            data,
-                            st.session_state.receiver_address,
-                            st.session_state.connection_id,
-                            st.session_state.encryption_key
-                        )
-                        
-                        if success:
-                            st.success("Request sent successfully")
-                            st.json(response)
-                            
-                            # Save to history
-                            history_entry = {
-                                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                                "request_type": request_type,
-                                "request_data": data,
-                                "response": response
-                            }
-                            st.session_state.responses.insert(0, history_entry)
-                        else:
-                            st.error(f"Request failed: {response}")
-    
-    with tabs[2]:
-        st.header("Response History")
+            if new_responses > 0:
+                st.success(f"Received {new_responses} new response(s)")
+            else:
+                st.info("No new responses")
         
-        if not st.session_state.responses:
-            st.info("No responses yet")
-        else:
-            for i, entry in enumerate(st.session_state.responses):
-                with st.expander(f"{entry['timestamp']} - {entry['request_type']}"):
-                    st.subheader("Request")
-                    st.json(entry['request_data'])
-                    st.subheader("Response")
-                    st.json(entry['response'])
+        # Display sent requests and responses
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Sent Requests")
+            if st.session_state.sent_requests:
+                for i, req in enumerate(st.session_state.sent_requests):
+                    with st.expander(f"Request {i+1} (ID: {req['id'][:8]}...)"):
+                        st.write("Request Data:")
+                        st.json(req["data"])
+                        st.write(f"Sent: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(req['timestamp']))}")
+            else:
+                st.write("No requests sent yet")
+        
+        with col2:
+            st.subheader("Received Responses")
+            if st.session_state.responses:
+                for i, resp in enumerate(st.session_state.responses):
+                    with st.expander(f"Response {i+1}"):
+                        st.write("For Request:")
+                        st.json(resp["request_data"])
+                        st.write("Response:")
+                        st.write(resp["response"])
+                        st.write(f"Received: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(resp['timestamp']))}")
+            else:
+                st.write("No responses received yet")
 
-if __name__ == "__main__":
-    main()
+# Footer
+st.markdown("---")
+st.markdown("WAN Communication Tool - Secure encrypted communication over wide area networks")
