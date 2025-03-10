@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 import qrcode
 from io import BytesIO
 import os
+from supabase import create_client
 
 # Set page config
 st.set_page_config(page_title="WAN Communication Tool", layout="wide")
@@ -29,11 +30,12 @@ if 'sent_requests' not in st.session_state:
 if 'responses' not in st.session_state:
     st.session_state.responses = []
 
-# Firebase config - you'll need to create a Firebase Realtime Database
-# and put your credentials here
-FIREBASE_URL = "https://your-firebase-project.firebaseio.com"  # Replace with your Firebase URL
-# If you have a Firebase API key (for some operations)
-FIREBASE_API_KEY = ""  # Optional
+# Supabase configuration
+SUPABASE_URL = "https://your-supabase-project.supabase.co"  # Replace with your Supabase URL
+SUPABASE_KEY = "your-supabase-anon-key"  # Replace with your Supabase anon/public key
+
+# Create Supabase client
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Helper functions for encryption
 def generate_key(passphrase, salt):
@@ -66,118 +68,171 @@ def generate_connection_code():
     code_hash = hashlib.sha256((unique_id + timestamp).encode()).hexdigest()
     return code_hash[:12]
 
-# Firebase-based WAN Communication
-class FirebaseWanCommunication:
-    def __init__(self, firebase_url):
-        self.firebase_url = firebase_url
-        
-    def _make_request(self, method, path, data=None):
-        """Make a request to Firebase."""
-        url = f"{self.firebase_url}/{path}.json"
-        
-        try:
-            if method == "GET":
-                response = requests.get(url)
-            elif method == "PUT":
-                response = requests.put(url, json=data)
-            elif method == "POST":
-                response = requests.post(url, json=data)
-            elif method == "PATCH":
-                response = requests.patch(url, json=data)
-            elif method == "DELETE":
-                response = requests.delete(url)
-                
-            if response.status_code in (200, 201, 204):
-                return response.json() if response.content else None
-            return None
-        except Exception as e:
-            st.error(f"Firebase request error: {str(e)}")
-            return None
+# Supabase-based WAN Communication
+class SupabaseWanCommunication:
+    def __init__(self, supabase_client):
+        self.supabase = supabase_client
         
     def register_receiver(self, connection_code, encryption_key_info):
         """Register a new receiver with a connection code."""
-        data = {
-            "active": True,
-            "created_at": int(time.time()),
-            "last_active": int(time.time()),
-            "encryption_info": encryption_key_info
-        }
-        result = self._make_request("PUT", f"connections/{connection_code}", data)
-        return result is not None
+        try:
+            data = {
+                "connection_code": connection_code,
+                "active": True,
+                "created_at": int(time.time()),
+                "last_active": int(time.time()),
+                "encryption_info": encryption_key_info
+            }
+            
+            # Insert into the connections table
+            result = self.supabase.table("connections").insert(data).execute()
+            
+            return len(result.data) > 0
+        except Exception as e:
+            st.error(f"Supabase error: {str(e)}")
+            return False
         
     def deregister_receiver(self, connection_code):
-        """Remove a receiver connection."""
-        result = self._make_request("DELETE", f"connections/{connection_code}")
-        return result is not None
+        """Remove a receiver connection by marking it as inactive."""
+        try:
+            # Update the connection to inactive
+            result = self.supabase.table("connections") \
+                .update({"active": False}) \
+                .eq("connection_code", connection_code) \
+                .execute()
+                
+            return len(result.data) > 0
+        except Exception as e:
+            st.error(f"Supabase error: {str(e)}")
+            return False
     
     def check_connection(self, connection_code):
         """Check if a connection code is active."""
-        result = self._make_request("GET", f"connections/{connection_code}/active")
-        return result is True
+        try:
+            result = self.supabase.table("connections") \
+                .select("active") \
+                .eq("connection_code", connection_code) \
+                .execute()
+                
+            if result.data and len(result.data) > 0:
+                return result.data[0]["active"]
+            return False
+        except Exception as e:
+            st.error(f"Supabase error: {str(e)}")
+            return False
     
     def update_last_active(self, connection_code):
         """Update the last active timestamp."""
-        data = {"last_active": int(time.time())}
-        self._make_request("PATCH", f"connections/{connection_code}", data)
+        try:
+            self.supabase.table("connections") \
+                .update({"last_active": int(time.time())}) \
+                .eq("connection_code", connection_code) \
+                .execute()
+        except Exception as e:
+            st.error(f"Supabase error: {str(e)}")
     
     def send_request(self, connection_code, request, encrypted=False):
         """Send a request from sender to receiver."""
-        # Check if connection exists
+        # Check if connection exists and is active
         if not self.check_connection(connection_code):
-            return False, "Connection not found"
+            return False, "Connection not found or inactive"
         
-        request_id = str(uuid.uuid4())
-        request_data = {
-            "id": request_id,
-            "data": request,
-            "encrypted": encrypted,
-            "timestamp": int(time.time()),
-            "processed": False
-        }
-        
-        result = self._make_request("PUT", f"connections/{connection_code}/requests/{request_id}", request_data)
-        return result is not None, request_id
+        try:
+            request_id = str(uuid.uuid4())
+            request_data = {
+                "request_id": request_id,
+                "connection_code": connection_code,
+                "data": json.dumps(request),
+                "encrypted": encrypted,
+                "timestamp": int(time.time()),
+                "processed": False
+            }
+            
+            # Insert the request
+            result = self.supabase.table("requests").insert(request_data).execute()
+            
+            return len(result.data) > 0, request_id
+        except Exception as e:
+            st.error(f"Supabase error: {str(e)}")
+            return False, str(e)
     
     def get_pending_requests(self, connection_code):
         """Get all pending requests for a receiver."""
-        requests = self._make_request("GET", f"connections/{connection_code}/requests")
-        if not requests:
-            return []
-        
-        pending = []
-        for req_id, req_data in requests.items():
-            if not req_data.get("processed", False):
-                # Mark as processed
-                self._make_request("PATCH", f"connections/{connection_code}/requests/{req_id}", {"processed": True})
-                req_data["id"] = req_id  # Add the ID to the data
-                pending.append(req_data)
+        try:
+            # Get unprocessed requests
+            result = self.supabase.table("requests") \
+                .select("*") \
+                .eq("connection_code", connection_code) \
+                .eq("processed", False) \
+                .execute()
                 
-        return pending
+            pending = []
+            for req in result.data:
+                # Mark as processed
+                self.supabase.table("requests") \
+                    .update({"processed": True}) \
+                    .eq("request_id", req["request_id"]) \
+                    .execute()
+                
+                # Format the request for the app
+                req["data"] = json.loads(req["data"])
+                req["id"] = req["request_id"]  # For compatibility with existing code
+                pending.append(req)
+                
+            return pending
+        except Exception as e:
+            st.error(f"Supabase error: {str(e)}")
+            return []
     
     def send_response(self, connection_code, request_id, response, encrypted=False):
         """Send a response from receiver to sender."""
-        response_data = {
-            "data": response,
-            "encrypted": encrypted,
-            "timestamp": int(time.time()),
-            "retrieved": False
-        }
-        
-        result = self._make_request("PUT", f"connections/{connection_code}/responses/{request_id}", response_data)
-        return result is not None
+        try:
+            response_data = {
+                "response_id": str(uuid.uuid4()),
+                "request_id": request_id,
+                "connection_code": connection_code,
+                "data": json.dumps(response),
+                "encrypted": encrypted,
+                "timestamp": int(time.time()),
+                "retrieved": False
+            }
+            
+            # Insert the response
+            result = self.supabase.table("responses").insert(response_data).execute()
+            
+            return len(result.data) > 0
+        except Exception as e:
+            st.error(f"Supabase error: {str(e)}")
+            return False
     
     def get_response(self, connection_code, request_id):
         """Get a response for a specific request."""
-        response = self._make_request("GET", f"connections/{connection_code}/responses/{request_id}")
-        if not response or response.get("retrieved", False):
+        try:
+            # Get unretrieved response for the request
+            result = self.supabase.table("responses") \
+                .select("*") \
+                .eq("connection_code", connection_code) \
+                .eq("request_id", request_id) \
+                .eq("retrieved", False) \
+                .execute()
+                
+            if result.data and len(result.data) > 0:
+                # Mark as retrieved
+                self.supabase.table("responses") \
+                    .update({"retrieved": True}) \
+                    .eq("response_id", result.data[0]["response_id"]) \
+                    .execute()
+                
+                # Return the response data
+                return json.loads(result.data[0]["data"])
+            
             return None
-        
-        # Mark as retrieved
-        self._make_request("PATCH", f"connections/{connection_code}/responses/{request_id}", {"retrieved": True})
-        return response.get("data")
+        except Exception as e:
+            st.error(f"Supabase error: {str(e)}")
+            return None
 
-# Create a global instance of WanCommunication
-wan_comm = FirebaseWanCommunication(FIREBASE_URL)
+# Create a global instance of SupabaseWanCommunication
+wan_comm = SupabaseWanCommunication(supabase)
 
 # Main app
 st.title("WAN Secure Communication")
@@ -207,7 +262,7 @@ with tab1:
                 st.success("Connection code generated!")
                 st.experimental_rerun()
             else:
-                st.error("Failed to establish connection. Please check your internet connection.")
+                st.error("Failed to establish connection. Please check your Supabase configuration.")
             
     else:
         col1, col2 = st.columns([3, 1])
