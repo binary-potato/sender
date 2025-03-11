@@ -1,12 +1,9 @@
 import streamlit as st
-import socket
-import threading
-import time
 import json
 import uuid
 import base64
-import hashlib
 import qrcode
+import time
 from io import BytesIO
 import requests
 from cryptography.fernet import Fernet
@@ -20,7 +17,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Initialize session state variables if they don't exist
+# Initialize session state variables
 if 'connection_code' not in st.session_state:
     st.session_state.connection_code = None
 if 'my_connection_code' not in st.session_state:
@@ -42,6 +39,10 @@ if 'encryption_key' not in st.session_state:
     )
     key = base64.urlsafe_b64encode(kdf.derive(b"secure_wan_app_key"))
     st.session_state.encryption_key = key
+if 'last_check' not in st.session_state:
+    st.session_state.last_check = time.time()
+if 'message_store' not in st.session_state:
+    st.session_state.message_store = {}
 
 # Setup Fernet encryption
 def get_cipher():
@@ -56,12 +57,12 @@ def generate_connection_code():
 # Function to encrypt a message
 def encrypt_message(message):
     cipher = get_cipher()
-    return cipher.encrypt(json.dumps(message).encode())
+    return cipher.encrypt(json.dumps(message).encode()).decode()
 
 # Function to decrypt a message
 def decrypt_message(encrypted_message):
     cipher = get_cipher()
-    decrypted = cipher.decrypt(encrypted_message)
+    decrypted = cipher.decrypt(encrypted_message.encode())
     return json.loads(decrypted.decode())
 
 # Function to create a QR code
@@ -79,55 +80,38 @@ def generate_qr_code(data):
     img.save(buffered)
     return buffered.getvalue()
 
-# Mock server functions (in a real app, you would use a real server)
-class MockServer:
-    _messages = {}  # Class variable to store messages: {device_id: [messages]}
+# Using session state as a simple database (in a real app, you'd use a real database)
+def store_message(target_id, encrypted_message):
+    if target_id not in st.session_state.message_store:
+        st.session_state.message_store[target_id] = []
+    st.session_state.message_store[target_id].append(encrypted_message)
+    return True
 
-    @classmethod
-    def send_message(cls, target_id, message_data):
-        if target_id not in cls._messages:
-            cls._messages[target_id] = []
-        cls._messages[target_id].append(message_data)
-        return True
+def get_messages():
+    device_id = st.session_state.my_connection_code
+    if not device_id or device_id not in st.session_state.message_store:
+        return []
+    
+    messages = st.session_state.message_store.get(device_id, [])
+    if device_id in st.session_state.message_store:
+        st.session_state.message_store[device_id] = []  # Clear messages after retrieving
+    return messages
 
-    @classmethod
-    def get_messages(cls, device_id):
-        messages = cls._messages.get(device_id, [])
-        if device_id in cls._messages:
-            cls._messages[device_id] = []  # Clear messages after retrieving
-        return messages
-
-# In a real app, you would replace these with actual API calls
-def send_to_server(target_id, encrypted_message):
-    # In a real app, you'd use a REST API or WebSocket
-    return MockServer.send_message(target_id, encrypted_message)
-
-def poll_server():
-    # Poll for new messages every few seconds
-    while st.session_state.is_listening:
-        if st.session_state.my_connection_code:
-            encrypted_messages = MockServer.get_messages(st.session_state.my_connection_code)
-            for encrypted_message in encrypted_messages:
-                try:
-                    message = decrypt_message(encrypted_message)
-                    # Add message to received messages
-                    st.session_state.received_messages.append({
-                        "timestamp": time.strftime("%H:%M:%S"),
-                        "content": message
-                    })
-                except Exception as e:
-                    st.error(f"Failed to decrypt message: {e}")
-        time.sleep(2)  # Poll every 2 seconds
-
-# Start polling thread
-def start_listening():
-    if not st.session_state.is_listening:
-        st.session_state.is_listening = True
-        threading.Thread(target=poll_server, daemon=True).start()
-
-# Stop polling thread
-def stop_listening():
-    st.session_state.is_listening = False
+# Check for new messages (this will be called regularly with st.rerun)
+def check_for_messages():
+    if st.session_state.my_connection_code and st.session_state.is_listening:
+        encrypted_messages = get_messages()
+        for encrypted_message in encrypted_messages:
+            try:
+                message = decrypt_message(encrypted_message)
+                # Add message to received messages
+                st.session_state.received_messages.append({
+                    "timestamp": time.strftime("%H:%M:%S"),
+                    "content": message
+                })
+            except Exception as e:
+                st.error(f"Failed to decrypt message: {e}")
+                print(e)
 
 # Main app layout
 st.title("WAN Communication App")
@@ -151,19 +135,23 @@ with tab1:
     # Send button
     if st.button("Send Message"):
         if connection_code and message_content:
+            # Ensure we have a connection code for ourselves
+            if not st.session_state.my_connection_code:
+                st.session_state.my_connection_code = generate_connection_code()
+                
             # Prepare message with content and instructions
             message = {
                 "content": message_content,
                 "instructions": custom_instructions,
-                "sender_id": st.session_state.my_connection_code or generate_connection_code(),
+                "sender_id": st.session_state.my_connection_code,
                 "timestamp": time.time()
             }
             
             # Encrypt the message
             encrypted_message = encrypt_message(message)
             
-            # Send to server
-            if send_to_server(connection_code, encrypted_message):
+            # Send to "server" (store in session state)
+            if store_message(connection_code, encrypted_message):
                 st.success("Message sent successfully!")
                 # Track sent messages
                 st.session_state.sent_messages.append({
@@ -192,21 +180,29 @@ with tab2:
     
     # Display connection code
     st.subheader("Your Connection Code")
-    st.code(st.session_state.my_connection_code)
+    connection_code_container = st.container()
+    with connection_code_container:
+        st.code(st.session_state.my_connection_code)
     
     # Generate QR code for the connection code
     qr_code = generate_qr_code(st.session_state.my_connection_code)
     st.image(qr_code, caption="Scan this QR code with the sender device")
     
     # Start/Stop listening button
-    if st.session_state.is_listening:
-        if st.button("Stop Listening"):
-            stop_listening()
-            st.info("Stopped listening for messages.")
-    else:
-        if st.button("Start Listening"):
-            start_listening()
-            st.info("Started listening for messages...")
+    listen_col1, listen_col2 = st.columns(2)
+    with listen_col1:
+        if st.button("Start Listening" if not st.session_state.is_listening else "Stop Listening"):
+            st.session_state.is_listening = not st.session_state.is_listening
+            if st.session_state.is_listening:
+                st.info("Started listening for messages...")
+            else:
+                st.info("Stopped listening for messages.")
+    
+    with listen_col2:
+        if st.session_state.is_listening:
+            st.success("Listening for messages...")
+        else:
+            st.warning("Not listening for messages")
     
     # Custom code for processing received data
     st.subheader("Custom Processing Code")
@@ -249,7 +245,7 @@ with tab2:
                                 "timestamp": time.time()
                             }
                             encrypted_response = encrypt_message(response_message)
-                            if send_to_server(msg['content']['sender_id'], encrypted_response):
+                            if store_message(msg['content']['sender_id'], encrypted_response):
                                 st.success("Response sent successfully!")
                             else:
                                 st.error("Failed to send response.")
@@ -268,10 +264,26 @@ with st.sidebar:
     3. On the sender device, enter the connection code and send a message
     4. The receiver will process the message and can send a response back
     
-    **Note:** This demo uses a mock server for demonstration. In a real-world application, you would need to implement a proper backend server.
+    **Note:** This demo uses Streamlit's session state for message storage. In a real-world application, you would implement a proper backend server.
     """)
     
     # Display your own connection code
     if st.session_state.my_connection_code:
         st.subheader("Your Device ID")
         st.code(st.session_state.my_connection_code)
+    
+    # Add a refresh button to manually check for messages
+    if st.button("Check for Messages"):
+        check_for_messages()
+        st.success("Checked for new messages")
+
+# Check for messages on page load if listening is active
+check_for_messages()
+
+# Add automatic periodic refresh if listening
+if st.session_state.is_listening:
+    # Only rerun every 3 seconds to avoid too many refreshes
+    current_time = time.time()
+    if current_time - st.session_state.last_check > 3:
+        st.session_state.last_check = current_time
+        st.rerun()
