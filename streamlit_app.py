@@ -1,17 +1,22 @@
 import streamlit as st
 import socket
-import requests
 import json
 import time
 import uuid
-from cryptography.fernet import Fernet
 import base64
 
-# Generate encryption key
-if 'encryption_key' not in st.session_state:
-    key = Fernet.generate_key()
-    st.session_state.encryption_key = key
-    st.session_state.cipher = Fernet(key)
+# Set page title
+st.title("Simple Communication App")
+
+# Initialize session state variables
+if 'device_id' not in st.session_state:
+    st.session_state.device_id = str(uuid.uuid4())
+if 'messages' not in st.session_state:
+    st.session_state.messages = {}
+if 'received' not in st.session_state:
+    st.session_state.received = []
+if 'sent' not in st.session_state:
+    st.session_state.sent = []
 
 # Get local IP
 def get_local_ip():
@@ -25,74 +30,90 @@ def get_local_ip():
         s.close()
     return IP
 
-# Check if server is running
-def check_server(url):
+# Simple encoding/decoding (not encryption, just to avoid plaintext)
+def encode_message(message_dict):
+    message_json = json.dumps(message_dict)
+    return base64.b64encode(message_json.encode()).decode()
+
+def decode_message(encoded_string):
     try:
-        response = requests.get(url, timeout=2)
-        return True
+        decoded = base64.b64decode(encoded_string.encode())
+        return json.loads(decoded)
     except:
-        return False
+        return None
 
-st.title("WAN Communication App")
-
-# Setup local message store for demo purposes
-if 'messages' not in st.session_state:
-    st.session_state.messages = {}
-if 'device_id' not in st.session_state:
-    st.session_state.device_id = str(uuid.uuid4())
-if 'received' not in st.session_state:
-    st.session_state.received = []
-
-# Simple encryption/decryption
-def encrypt(text):
-    return st.session_state.cipher.encrypt(json.dumps(text).encode()).decode()
-
-def decrypt(text):
-    return json.loads(st.session_state.cipher.decrypt(text.encode()))
-
-# Demo server endpoints (in-memory)
-def demo_send_message(target_id, content):
-    if target_id not in st.session_state.messages:
-        st.session_state.messages[target_id] = []
-    st.session_state.messages[target_id].append(content)
+# Demo message functions
+def send_message(recipient_id, content):
+    if recipient_id not in st.session_state.messages:
+        st.session_state.messages[recipient_id] = []
+    
+    message = {
+        "content": content,
+        "sender": st.session_state.device_id,
+        "timestamp": time.time()
+    }
+    
+    encoded = encode_message(message)
+    st.session_state.messages[recipient_id].append(encoded)
+    
+    # Store in sent messages
+    st.session_state.sent.append({
+        "recipient": recipient_id,
+        "content": content,
+        "time": time.time()
+    })
+    
     return True
 
-def demo_get_messages(device_id):
-    messages = st.session_state.messages.get(device_id, [])
-    st.session_state.messages[device_id] = []
-    return messages
+def check_messages():
+    my_id = st.session_state.device_id
+    incoming = st.session_state.messages.get(my_id, [])
+    
+    # Clear messages
+    if my_id in st.session_state.messages:
+        st.session_state.messages[my_id] = []
+    
+    new_messages = []
+    for encoded_msg in incoming:
+        msg = decode_message(encoded_msg)
+        if msg:
+            new_messages.append(msg)
+            st.session_state.received.append(msg)
+    
+    return new_messages
 
-# Main interface
-tabs = st.tabs(["Send Messages", "Receive Messages"])
+# Main layout with tabs
+tab1, tab2 = st.tabs(["Send", "Receive"])
 
-with tabs[0]:
+with tab1:
     st.header("Send Message")
-    receiver_id = st.text_input("Receiver ID")
+    recipient = st.text_input("Recipient ID")
     message = st.text_area("Message")
     
-    if st.button("Send Message"):
-        if receiver_id and message:
-            encrypted = encrypt({"content": message, "from": st.session_state.device_id, "time": time.time()})
-            if demo_send_message(receiver_id, encrypted):
+    if st.button("Send"):
+        if recipient and message:
+            if send_message(recipient, message):
                 st.success("Message sent!")
         else:
-            st.error("Please enter receiver ID and message")
+            st.warning("Please enter both recipient ID and message")
+    
+    # Show sent messages
+    if st.session_state.sent:
+        st.subheader("Sent Messages")
+        for msg in reversed(st.session_state.sent):
+            st.write(f"To: {msg['recipient']}")
+            st.write(f"Message: {msg['content']}")
+            st.write(f"Time: {time.ctime(msg['time'])}")
+            st.divider()
 
-with tabs[1]:
+with tab2:
     st.header("Receive Messages")
-    st.write(f"Your device ID: **{st.session_state.device_id}**")
+    st.info(f"Your Device ID: **{st.session_state.device_id}**")
     
     if st.button("Check for Messages"):
-        messages = demo_get_messages(st.session_state.device_id)
-        for msg in messages:
-            try:
-                decrypted = decrypt(msg)
-                st.session_state.received.append(decrypted)
-            except:
-                st.error("Failed to decrypt a message")
-        
-        if messages:
-            st.success(f"Received {len(messages)} new messages")
+        new_msgs = check_messages()
+        if new_msgs:
+            st.success(f"Received {len(new_msgs)} new message(s)!")
         else:
             st.info("No new messages")
     
@@ -100,18 +121,21 @@ with tabs[1]:
     if st.session_state.received:
         st.subheader("Received Messages")
         for msg in reversed(st.session_state.received):
-            with st.expander(f"Message from {msg['from'][:8]}..."):
-                st.write(f"**Content:** {msg['content']}")
-                st.write(f"**Time:** {time.ctime(msg['time'])}")
+            st.write(f"From: {msg['sender']}")
+            st.write(f"Message: {msg['content']}")
+            st.write(f"Time: {time.ctime(msg['timestamp'])}")
+            st.divider()
 
+# Sidebar with info
 with st.sidebar:
-    st.header("App Information")
-    st.info("""
-    This is a simplified version that stores messages in memory for demo purposes.
+    st.header("App Info")
+    st.write("This simplified version stores messages in memory only.")
+    st.write("Share your Device ID with others to receive messages.")
     
-    - Your device ID is shown on the Receive Messages tab
-    - To send a message, you need the receiver's device ID
-    - Messages are encrypted for security
-    """)
+    st.code(st.session_state.device_id)
     
-    st.code(f"Your Device ID: {st.session_state.device_id}")
+    st.write(f"Your IP address: {get_local_ip()}")
+    
+    if st.button("Generate New ID"):
+        st.session_state.device_id = str(uuid.uuid4())
+        st.rerun()
