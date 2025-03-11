@@ -4,48 +4,12 @@ import uuid
 import base64
 import qrcode
 import time
-import os
 import socket
-import threading
 import requests
-from fastapi import FastAPI, BackgroundTasks, Request
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 from io import BytesIO
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-import uvicorn
-import nest_asyncio
-import asyncio
-
-# Initialize FastAPI app for communication
-api = FastAPI()
-
-# Data models for API
-class Message(BaseModel):
-    target_id: str
-    encrypted_content: str
-
-# In-memory message store
-message_store = {}
-
-# API endpoint to receive messages
-@api.post("/send_message")
-async def receive_message(message: Message):
-    if message.target_id not in message_store:
-        message_store[message.target_id] = []
-    message_store[message.target_id].append(message.encrypted_content)
-    return {"status": "success"}
-
-# API endpoint to retrieve messages
-@api.get("/get_messages/{device_id}")
-async def get_messages(device_id: str):
-    messages = message_store.get(device_id, [])
-    # Clear messages after retrieving
-    if device_id in message_store:
-        message_store[device_id] = []
-    return {"messages": messages}
 
 # Get local IP address
 def get_local_ip():
@@ -59,21 +23,6 @@ def get_local_ip():
     finally:
         s.close()
     return IP
-
-# Start FastAPI server in a separate thread
-def start_api_server():
-    port = 8000
-    host = get_local_ip()
-    # Apply nest_asyncio to allow running asyncio in Streamlit
-    nest_asyncio.apply()
-    config = uvicorn.Config(api, host=host, port=port, log_level="error")
-    server = uvicorn.Server(config)
-    
-    # Store the host address for later use
-    st.session_state.api_host = f"http://{host}:{port}"
-    
-    # Run the server in asyncio event loop
-    asyncio.run(server.serve())
 
 # Streamlit app begins here
 st.set_page_config(
@@ -93,8 +42,6 @@ if 'received_messages' not in st.session_state:
     st.session_state.received_messages = []
 if 'sent_messages' not in st.session_state:
     st.session_state.sent_messages = []
-if 'server_started' not in st.session_state:
-    st.session_state.server_started = False
 if 'encryption_key' not in st.session_state:
     # Generate a unique salt for the session
     salt = uuid.uuid4().hex.encode()
@@ -108,8 +55,9 @@ if 'encryption_key' not in st.session_state:
     st.session_state.encryption_key = key
 if 'last_check' not in st.session_state:
     st.session_state.last_check = time.time()
-if 'api_host' not in st.session_state:
-    st.session_state.api_host = None
+
+# Fixed API host with local IP
+st.session_state.api_host = f"http://{get_local_ip()}:8000"
 
 # Setup Fernet encryption
 def get_cipher():
@@ -118,10 +66,7 @@ def get_cipher():
 # Function to generate a unique connection code
 def generate_connection_code():
     # Include the API host in the connection code
-    if st.session_state.api_host:
-        device_id = f"{st.session_state.api_host}|{uuid.uuid4()}"
-    else:
-        device_id = f"no_host|{uuid.uuid4()}"
+    device_id = f"{st.session_state.api_host}|{uuid.uuid4()}"
     st.session_state.my_connection_code = device_id
     return device_id
 
@@ -192,10 +137,8 @@ def check_for_messages():
     
     device_id = parts[1]
     
-    # Get messages from local API
-    encrypted_messages = message_store.get(device_id, [])
-    if device_id in message_store:
-        message_store[device_id] = []  # Clear after reading
+    # Get messages from API
+    encrypted_messages = get_messages_from_api(st.session_state.api_host, device_id)
     
     for encrypted_message in encrypted_messages:
         try:
@@ -208,21 +151,21 @@ def check_for_messages():
         except Exception as e:
             st.error(f"Failed to decrypt message: {e}")
 
-# Start the API server if not already running
-if not st.session_state.server_started:
-    st.session_state.server_started = True
-    # Start the server in a background thread
-    threading.Thread(target=start_api_server, daemon=True).start()
-    time.sleep(1)  # Give the server a moment to start
-
 # Main app layout
 st.title("WAN Communication App")
 
+# Check if API server is reachable
+try:
+    response = requests.get(f"{st.session_state.api_host}")
+    api_available = True
+except:
+    api_available = False
+
 # Show the API server status
-if st.session_state.api_host:
+if api_available:
     st.success(f"Server running at: {st.session_state.api_host}")
 else:
-    st.warning("Server starting... Please wait.")
+    st.warning(f"Cannot connect to API server at {st.session_state.api_host}. Make sure to run api_server.py first.")
 
 # Tabs
 tab1, tab2 = st.tabs(["Sender Mode", "Receiver Mode"])
@@ -295,7 +238,7 @@ with tab2:
     st.header("Receive Data from Remote Device")
     
     # Generate connection code if not already generated
-    if not st.session_state.my_connection_code and st.session_state.api_host:
+    if not st.session_state.my_connection_code:
         st.session_state.my_connection_code = generate_connection_code()
     
     # Display connection code
@@ -311,8 +254,6 @@ with tab2:
         # Generate QR code for the connection code
         qr_code = generate_qr_code(st.session_state.my_connection_code)
         st.image(qr_code, caption="Scan this QR code with the sender device")
-    else:
-        st.info("Waiting for server to start... Please wait.")
     
     # Start/Stop listening button
     listen_col1, listen_col2 = st.columns(2)
