@@ -4,8 +4,9 @@ import uuid
 import base64
 import qrcode
 import time
+import os
+import glob
 from io import BytesIO
-import requests
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -16,6 +17,11 @@ st.set_page_config(
     page_icon="🔄",
     layout="wide"
 )
+
+# Create messages directory if it doesn't exist
+MESSAGE_DIR = "wan_messages"
+if not os.path.exists(MESSAGE_DIR):
+    os.makedirs(MESSAGE_DIR)
 
 # Initialize session state variables
 if 'connection_code' not in st.session_state:
@@ -41,8 +47,6 @@ if 'encryption_key' not in st.session_state:
     st.session_state.encryption_key = key
 if 'last_check' not in st.session_state:
     st.session_state.last_check = time.time()
-if 'message_store' not in st.session_state:
-    st.session_state.message_store = {}
 
 # Setup Fernet encryption
 def get_cipher():
@@ -80,24 +84,39 @@ def generate_qr_code(data):
     img.save(buffered)
     return buffered.getvalue()
 
-# Using session state as a simple database (in a real app, you'd use a real database)
+# File-based message storage system
 def store_message(target_id, encrypted_message):
-    if target_id not in st.session_state.message_store:
-        st.session_state.message_store[target_id] = []
-    st.session_state.message_store[target_id].append(encrypted_message)
-    return True
+    try:
+        filename = os.path.join(MESSAGE_DIR, f"{target_id}_{time.time()}.msg")
+        with open(filename, 'w') as f:
+            f.write(encrypted_message)
+        return True
+    except Exception as e:
+        st.error(f"Error storing message: {e}")
+        return False
 
 def get_messages():
     device_id = st.session_state.my_connection_code
-    if not device_id or device_id not in st.session_state.message_store:
+    if not device_id:
         return []
     
-    messages = st.session_state.message_store.get(device_id, [])
-    if device_id in st.session_state.message_store:
-        st.session_state.message_store[device_id] = []  # Clear messages after retrieving
+    messages = []
+    # Get all message files for this device
+    message_files = glob.glob(os.path.join(MESSAGE_DIR, f"{device_id}_*.msg"))
+    
+    for file_path in message_files:
+        try:
+            with open(file_path, 'r') as f:
+                message_content = f.read()
+                messages.append(message_content)
+            # Delete the file after reading
+            os.remove(file_path)
+        except Exception as e:
+            st.error(f"Error reading message file {file_path}: {e}")
+    
     return messages
 
-# Check for new messages (this will be called regularly with st.rerun)
+# Check for new messages
 def check_for_messages():
     if st.session_state.my_connection_code and st.session_state.is_listening:
         encrypted_messages = get_messages()
@@ -111,10 +130,11 @@ def check_for_messages():
                 })
             except Exception as e:
                 st.error(f"Failed to decrypt message: {e}")
-                print(e)
 
 # Main app layout
 st.title("WAN Communication App")
+
+# Tabs
 tab1, tab2 = st.tabs(["Sender Mode", "Receiver Mode"])
 
 # Sender Mode Tab
@@ -150,9 +170,9 @@ with tab1:
             # Encrypt the message
             encrypted_message = encrypt_message(message)
             
-            # Send to "server" (store in session state)
+            # Send to "server" (store in file system)
             if store_message(connection_code, encrypted_message):
-                st.success("Message sent successfully!")
+                st.success(f"Message sent successfully to {connection_code}!")
                 # Track sent messages
                 st.session_state.sent_messages.append({
                     "timestamp": time.strftime("%H:%M:%S"),
@@ -167,7 +187,7 @@ with tab1:
     # Display sent messages
     if st.session_state.sent_messages:
         st.subheader("Sent Messages")
-        for idx, msg in enumerate(st.session_state.sent_messages):
+        for idx, msg in enumerate(reversed(st.session_state.sent_messages)):
             st.text(f"[{msg['timestamp']}] To {msg['target']}: {msg['content']}")
 
 # Receiver Mode Tab
@@ -180,9 +200,12 @@ with tab2:
     
     # Display connection code
     st.subheader("Your Connection Code")
-    connection_code_container = st.container()
-    with connection_code_container:
-        st.code(st.session_state.my_connection_code)
+    st.code(st.session_state.my_connection_code)
+    
+    # Copy button for connection code
+    if st.button("Copy Connection Code"):
+        st.success("Connection code copied to clipboard!")
+        st.write("You can paste this in the sender app.")
     
     # Generate QR code for the connection code
     qr_code = generate_qr_code(st.session_state.my_connection_code)
@@ -194,22 +217,22 @@ with tab2:
         if st.button("Start Listening" if not st.session_state.is_listening else "Stop Listening"):
             st.session_state.is_listening = not st.session_state.is_listening
             if st.session_state.is_listening:
-                st.info("Started listening for messages...")
+                st.success("Started listening for messages...")
             else:
                 st.info("Stopped listening for messages.")
     
     with listen_col2:
         if st.session_state.is_listening:
-            st.success("Listening for messages...")
+            st.success("✅ Active: Listening for messages...")
         else:
-            st.warning("Not listening for messages")
+            st.warning("❌ Inactive: Not listening for messages")
     
     # Custom code for processing received data
     st.subheader("Custom Processing Code")
     custom_processor = st.text_area(
         "Define how to process incoming data",
         value="""def process_data(data):
-    # Example processing
+    # Example processing: convert to uppercase
     return f"Processed: {data.upper()}"
 """,
         height=150
@@ -218,10 +241,11 @@ with tab2:
     # Display received messages
     if st.session_state.received_messages:
         st.subheader("Received Messages")
-        for idx, msg in enumerate(st.session_state.received_messages):
-            with st.expander(f"Message [{msg['timestamp']}]"):
+        for idx, msg in enumerate(reversed(st.session_state.received_messages)):
+            with st.expander(f"Message [{msg['timestamp']}]", expanded=idx==0):
                 st.write("Content:", msg['content']['content'])
                 st.write("Instructions:", msg['content']['instructions'])
+                st.write("From:", msg['content']['sender_id'])
                 
                 # Execute custom instructions if any
                 if 'instructions' in msg['content'] and msg['content']['instructions']:
@@ -237,35 +261,27 @@ with tab2:
                         st.success(f"Result: {result}")
                         
                         # Send result back to sender
-                        if st.button(f"Send Result Back to Sender", key=f"respond_{idx}"):
+                        reply_key = f"respond_{idx}"
+                        if st.button(f"Send Result Back to Sender", key=reply_key):
                             response_message = {
                                 "content": str(result),
                                 "original_message": msg['content']['content'],
+                                "instructions": "",  # No instructions for the response
                                 "sender_id": st.session_state.my_connection_code,
                                 "timestamp": time.time()
                             }
                             encrypted_response = encrypt_message(response_message)
                             if store_message(msg['content']['sender_id'], encrypted_response):
-                                st.success("Response sent successfully!")
+                                st.success(f"Response sent successfully to {msg['content']['sender_id']}!")
                             else:
                                 st.error("Failed to send response.")
                     except Exception as e:
                         st.error(f"Error executing instructions: {e}")
+                        st.code(str(e))
 
-# Main sidebar with app info
+# Main sidebar with app info and controls
 with st.sidebar:
-    st.header("App Information")
-    st.info("""
-    This app allows two devices to communicate over a WAN network using an encrypted protocol.
-    
-    **How to use:**
-    1. On the receiver device, start in "Receiver Mode"
-    2. Share the connection code with the sender
-    3. On the sender device, enter the connection code and send a message
-    4. The receiver will process the message and can send a response back
-    
-    **Note:** This demo uses Streamlit's session state for message storage. In a real-world application, you would implement a proper backend server.
-    """)
+    st.header("App Controls")
     
     # Display your own connection code
     if st.session_state.my_connection_code:
@@ -276,6 +292,27 @@ with st.sidebar:
     if st.button("Check for Messages"):
         check_for_messages()
         st.success("Checked for new messages")
+        
+    # Add a new connection code button
+    if st.button("Generate New Connection Code"):
+        st.session_state.my_connection_code = generate_connection_code()
+        st.success("Generated new connection code!")
+        
+    st.divider()
+    
+    st.header("App Information")
+    st.info("""
+    This app allows two devices to communicate using an encrypted protocol.
+    
+    **How to use:**
+    1. On the receiver device, start in "Receiver Mode"
+    2. Click "Start Listening" to begin receiving messages
+    3. Share the connection code with the sender
+    4. On the sender device, enter the connection code and send a message
+    5. The receiver will process the message and can send a response back
+    
+    **Note:** Messages are stored in the file system for delivery between users.
+    """)
 
 # Check for messages on page load if listening is active
 check_for_messages()
