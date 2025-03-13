@@ -12,19 +12,25 @@ import uuid
 @st.cache_resource
 def initialize_firebase():
     config = {
-        "databaseURL": "https://science-project-c6e47-default-rtdb.firebaseio.com/",  # Replace with your Firebase database URL
+        "apiKey": "AIzaSyBAspGDK14JlqF9RgumIc40DL-SMdshz8c",  # Replace with your Firebase API key
+        "authDomain": "science-project-c6e47.firebaseapp.com",  # Replace with your Firebase auth domain
+        "databaseURL": "https://science-project-c6e47-default-rtdb.firebaseio.com",  # Replace with your Firebase database URL
+        "storageBucket": "science-project-c6e47.firebasestorage.app",  # Replace with your Firebase storage bucket
     }
     
-    # Initialize Firebase with just the database URL
+    # Initialize Firebase
     firebase = pyrebase.initialize_app(config)
     return firebase
+
+# Initialize db as None before the try block
+db = None
 
 try:
     firebase = initialize_firebase()
     db = firebase.database()
 except Exception as e:
     st.error(f"Firebase initialization error: {e}")
-    st.info("Please update the Firebase database URL.")
+    st.info("Please update the Firebase configuration.")
 
 # Function to generate a random connection code
 def generate_connection_code(length=6):
@@ -118,55 +124,59 @@ def main():
             with request_container:
                 placeholder = st.empty()
                 
-                try:
-                    # Get current data
-                    conn_path = f"connections/{st.session_state.receiver_code}"
-                    data = db.child(conn_path).get().val()
-                    
-                    if data and 'requests' in data:
-                        for request_id, request_data in data['requests'].items():
-                            # Skip already processed requests
-                            if request_id in st.session_state.last_processed:
-                                continue
-                                
-                            if 'status' in request_data and request_data['status'] == 'pending':
-                                # Process the request based on handler type
-                                result = ""
-                                if handler_type == "Echo":
-                                    result = f"Echo: {request_data['data']}"
-                                elif handler_type == "Math Operation":
-                                    try:
-                                        result = f"Result: {eval(request_data['data'])}"
-                                    except:
-                                        result = "Invalid math expression"
-                                elif handler_type == "Text Processing":
-                                    text = request_data['data']
-                                    result = f"Uppercase: {text.upper()}, Lowercase: {text.lower()}, Length: {len(text)}"
-                                elif handler_type == "Custom":
-                                    try:
-                                        # Execute custom code
-                                        local_vars = {'data': request_data['data'], 'result': ''}
-                                        exec(custom_handler, {'__builtins__': {}}, local_vars)
-                                        result = local_vars.get('result', 'No result provided')
-                                    except Exception as e:
-                                        result = f"Error in custom handler: {str(e)}"
-                                
-                                # Display request and result
-                                st.write(f"📬 Request received: {request_data['data']}")
-                                st.write(f"✅ Response: {result}")
-                                
-                                # Send response
-                                db.child(conn_path).child(f"requests/{request_id}").update({
-                                    'status': 'completed',
-                                    'result': result,
-                                    'completed_at': int(time.time() * 1000)
-                                })
-                                
-                                # Mark as processed
-                                st.session_state.last_processed[request_id] = True
-                                
-                except Exception as e:
-                    st.error(f"Error in receiver mode: {str(e)}")
+                # Check if db is initialized
+                if db is None:
+                    st.error("Firebase database is not initialized. Please check your configuration.")
+                else:
+                    try:
+                        # Get current data
+                        conn_path = f"connections/{st.session_state.receiver_code}"
+                        data = db.child(conn_path).get().val()
+                        
+                        if data and 'requests' in data:
+                            for request_id, request_data in data['requests'].items():
+                                # Skip already processed requests
+                                if request_id in st.session_state.last_processed:
+                                    continue
+                                    
+                                if 'status' in request_data and request_data['status'] == 'pending':
+                                    # Process the request based on handler type
+                                    result = ""
+                                    if handler_type == "Echo":
+                                        result = f"Echo: {request_data['data']}"
+                                    elif handler_type == "Math Operation":
+                                        try:
+                                            result = f"Result: {eval(request_data['data'])}"
+                                        except Exception as math_error:
+                                            result = f"Invalid math expression: {str(math_error)}"
+                                    elif handler_type == "Text Processing":
+                                        text = request_data['data']
+                                        result = f"Uppercase: {text.upper()}, Lowercase: {text.lower()}, Length: {len(text)}"
+                                    elif handler_type == "Custom":
+                                        try:
+                                            # Execute custom code
+                                            local_vars = {'data': request_data['data'], 'result': ''}
+                                            exec(custom_handler, {'__builtins__': {}}, local_vars)
+                                            result = local_vars.get('result', 'No result provided')
+                                        except Exception as e:
+                                            result = f"Error in custom handler: {str(e)}"
+                                    
+                                    # Display request and result
+                                    st.write(f"📬 Request received: {request_data['data']}")
+                                    st.write(f"✅ Response: {result}")
+                                    
+                                    # Send response
+                                    db.child(conn_path).child(f"requests/{request_id}").update({
+                                        'status': 'completed',
+                                        'result': result,
+                                        'completed_at': int(time.time() * 1000)
+                                    })
+                                    
+                                    # Mark as processed
+                                    st.session_state.last_processed[request_id] = True
+                                    
+                    except Exception as e:
+                        st.error(f"Error in receiver mode: {str(e)}")
     
     # Sender Mode
     with tab2:
@@ -183,42 +193,46 @@ def main():
             
             # Button to send the request
             if st.button("Send Request"):
-                try:
-                    # Generate a unique ID for this request
-                    request_id = str(uuid.uuid4())
-                    
-                    # Create the request data
-                    request_object = {
-                        'data': request_data,
-                        'status': 'pending',
-                        'timestamp': int(time.time() * 1000)
-                    }
-                    
-                    # Send the request to Firebase
-                    conn_path = f"connections/{connection_code}/requests/{request_id}"
-                    db.child(conn_path).set(request_object)
-                    
-                    st.success("Request sent! Waiting for response...")
-                    
-                    # Wait for response
-                    response_placeholder = st.empty()
-                    
-                    # Poll for response
-                    for i in range(30):  # Wait for max 30 seconds
-                        current_data = db.child(conn_path).get().val()
+                # Check if db is initialized
+                if db is None:
+                    st.error("Firebase database is not initialized. Please check your configuration.")
+                else:
+                    try:
+                        # Generate a unique ID for this request
+                        request_id = str(uuid.uuid4())
                         
-                        if current_data and current_data.get('status') == 'completed':
-                            response_placeholder.success(f"Response received: {current_data.get('result')}")
-                            break
+                        # Create the request data
+                        request_object = {
+                            'data': request_data,
+                            'status': 'pending',
+                            'timestamp': int(time.time() * 1000)
+                        }
                         
-                        # Update waiting message with a countdown
-                        response_placeholder.info(f"Waiting for response... ({30-i} seconds remaining)")
-                        time.sleep(1)
-                    else:
-                        response_placeholder.warning("No response received within timeout period.")
-                
-                except Exception as e:
-                    st.error(f"Error sending request: {str(e)}")
+                        # Send the request to Firebase
+                        conn_path = f"connections/{connection_code}/requests/{request_id}"
+                        db.child(conn_path).set(request_object)
+                        
+                        st.success("Request sent! Waiting for response...")
+                        
+                        # Wait for response
+                        response_placeholder = st.empty()
+                        
+                        # Poll for response
+                        for i in range(30):  # Wait for max 30 seconds
+                            current_data = db.child(conn_path).get().val()
+                            
+                            if current_data and current_data.get('status') == 'completed':
+                                response_placeholder.success(f"Response received: {current_data.get('result')}")
+                                break
+                            
+                            # Update waiting message with a countdown
+                            response_placeholder.info(f"Waiting for response... ({30-i} seconds remaining)")
+                            time.sleep(1)
+                        else:
+                            response_placeholder.warning("No response received within timeout period.")
+                    
+                    except Exception as e:
+                        st.error(f"Error sending request: {str(e)}")
 
 if __name__ == "__main__":
     main()
