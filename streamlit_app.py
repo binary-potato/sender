@@ -21,6 +21,14 @@ except ImportError:
     MESHTASTIC_AVAILABLE = False
     st.warning("Meshtastic library not installed. To use Meshtastic functionality, install it with: pip install meshtastic")
 
+# Conditionally import RLYR 998 library
+try:
+    import rlyr998
+    RLYR998_AVAILABLE = True
+except ImportError:
+    RLYR998_AVAILABLE = False
+    st.warning("RLYR 998 library not installed. To use RLYR 998 functionality, install it with: pip install rlyr998")
+
 # Mock radio implementation for development/testing
 class MockRadio:
     def __init__(self):
@@ -108,6 +116,97 @@ class MeshtasticRadio:
         if self.interface:
             self.interface.close()
 
+# RLYR 998 implementation
+class RLYR998Radio:
+    def __init__(self, port=None, baudrate=9600):
+        self.interface = None
+        self.connected = False
+        self.message_queue = queue.Queue()
+        self.device_info = {}
+        
+        # Try to connect to RLYR 998 device
+        if RLYR998_AVAILABLE:
+            try:
+                self.interface = rlyr998.SerialInterface(port, baudrate=baudrate)
+                self.connected = True
+                
+                # Set up message receiving
+                self.interface.register_callback(self.on_message_received)
+                
+                # Get device information
+                self.device_info = {
+                    "device_id": self.interface.get_device_id(),
+                    "firmware_version": self.interface.get_firmware_version(),
+                    "network_id": self.interface.get_network_id()
+                }
+                print(f"Connected to RLYR 998 device: {self.device_info['device_id']}")
+                
+                # Initialize network settings
+                self.interface.set_power_level(3)  # Medium power level
+                self.interface.set_frequency_hopping(True)  # Enable frequency hopping for better reliability
+                
+            except Exception as e:
+                print(f"Error connecting to RLYR 998: {e}")
+        else:
+            print("RLYR 998 library not available")
+    
+    def on_message_received(self, message_data):
+        """Callback for when a message is received from the RLYR network"""
+        try:
+            # Extract the message data
+            sender = message_data.get('sender_id', 'unknown')
+            message = message_data.get('payload', '')
+            
+            # Add to our queue
+            self.message_queue.put({"sender": sender, "message": message})
+            
+            print(f"Received RLYR 998 message from {sender}: {message}")
+        except Exception as e:
+            print(f"Error processing RLYR 998 message: {e}")
+    
+    def send_message(self, recipient, message):
+        if not self.connected or self.interface is None:
+            return False
+            
+        try:
+            # For RLYR 998, we can send to specific recipients or broadcast
+            if recipient == "broadcast":
+                self.interface.broadcast_message(message)
+            else:
+                self.interface.send_directed_message(recipient, message)
+            return True
+        except Exception as e:
+            print(f"Error sending RLYR 998 message: {e}")
+            return False
+    
+    def check_messages(self):
+        # Check our queue that's populated by the callback
+        if not self.message_queue.empty():
+            return self.message_queue.get()
+        return None
+    
+    def get_network_status(self):
+        """Get RLYR 998 network status information"""
+        if not self.connected or self.interface is None:
+            return {}
+            
+        try:
+            return {
+                "signal_strength": self.interface.get_signal_strength(),
+                "battery_level": self.interface.get_battery_level(),
+                "connected_nodes": self.interface.get_connected_nodes(),
+                "packets_sent": self.interface.get_packets_sent(),
+                "packets_received": self.interface.get_packets_received(),
+                "error_rate": self.interface.get_error_rate()
+            }
+        except Exception as e:
+            print(f"Error getting RLYR 998 network status: {e}")
+            return {}
+    
+    def close(self):
+        if self.interface:
+            self.interface.close()
+
 # Firebase implementation
 class FirebaseComm:
     def __init__(self, config):
@@ -181,12 +280,17 @@ class FirebaseComm:
 # Firebase configuration - no authentication
 def get_firebase_config():
     return {
-        "apiKey": os.environ.get("FIREBASE_API_KEY", "your-api-key"),
-        "authDomain": os.environ.get("FIREBASE_AUTH_DOMAIN", "your-project-id.firebaseapp.com"),
-        "databaseURL": os.environ.get("FIREBASE_DATABASE_URL", "https://your-project-id-default-rtdb.firebaseio.com/"),
-        "storageBucket": os.environ.get("FIREBASE_STORAGE_BUCKET", "your-project-id.appspot.com"),
+        "apiKey": os.environ.get("FIREBASE_API_KEY", "AIzaSyBAspGDK14JlqF9RgumIc40DL-SMdshz8c"),
+        "authDomain": os.environ.get("FIREBASE_AUTH_DOMAIN", "science-project-c6e47.firebaseapp.com"),
+        "databaseURL": os.environ.get("FIREBASE_DATABASE_URL", "https://science-project-c6e47-default-rtdb.firebaseio.com"),
+        "storageBucket": os.environ.get("FIREBASE_STORAGE_BUCKET", "science-project-c6e47.firebasestorage.app"),
     }
-
+#apiKey: "AIzaSyBAspGDK14JlqF9RgumIc40DL-SMdshz8c",
+  #authDomain: "science-project-c6e47.firebaseapp.com",
+  #databaseURL: "https://science-project-c6e47-default-rtdb.firebaseio.com",
+  #projectId: "science-project-c6e47",
+  #storageBucket: "science-project-c6e47.firebasestorage.app",
+  #messagingSenderId: "544287963506",
 # Initialize communication method
 @st.cache_resource
 def initialize_communication(method="mock"):
@@ -197,6 +301,12 @@ def initialize_communication(method="mock"):
             return MeshtasticRadio()
         else:
             st.error("Meshtastic library not available")
+            return MockRadio()
+    elif method == "rlyr998":
+        if RLYR998_AVAILABLE:
+            return RLYR998Radio()
+        else:
+            st.error("RLYR 998 library not available")
             return MockRadio()
     else:  # Use mock as default/fallback
         return MockRadio()
@@ -247,13 +357,14 @@ def main():
     # Communication method selection
     comm_method = st.sidebar.radio(
         "Communication Method",
-        ["Internet (Firebase)", "Local Radio (Meshtastic)", "Mock (Testing)"]
+        ["Internet (Firebase)", "Local Radio (Meshtastic)", "RLYR 998", "Mock (Testing)"]
     )
     
     # Initialize appropriate communication method
     method_map = {
         "Internet (Firebase)": "firebase",
         "Local Radio (Meshtastic)": "meshtastic",
+        "RLYR 998": "rlyr998",
         "Mock (Testing)": "mock"
     }
     
@@ -271,8 +382,23 @@ def main():
         st.sidebar.error(f"{comm_method} not connected")
         if comm_method == "Local Radio (Meshtastic)":
             st.sidebar.info("Make sure your Meshtastic device is connected via USB")
+        elif comm_method == "RLYR 998":
+            st.sidebar.info("Make sure your RLYR 998 device is connected via USB")
         elif comm_method == "Internet (Firebase)":
             st.sidebar.info("Check your Firebase configuration and internet connection")
+    
+    # Display RLYR 998 specific information if applicable
+    if comm_method == "RLYR 998" and comm.connected:
+        with st.sidebar.expander("RLYR 998 Network Status"):
+            if hasattr(comm, 'get_network_status'):
+                network_status = comm.get_network_status()
+                if network_status:
+                    st.write(f"Signal Strength: {network_status.get('signal_strength', 'N/A')}%")
+                    st.write(f"Battery Level: {network_status.get('battery_level', 'N/A')}%")
+                    st.write(f"Connected Nodes: {network_status.get('connected_nodes', 'N/A')}")
+                    st.write(f"Packets Sent: {network_status.get('packets_sent', 'N/A')}")
+                    st.write(f"Packets Received: {network_status.get('packets_received', 'N/A')}")
+                    st.write(f"Error Rate: {network_status.get('error_rate', 'N/A')}%")
     
     # Initialize session state for received messages
     if 'message_queue' not in st.session_state:
@@ -308,7 +434,7 @@ def main():
         st.session_state.message_thread = thread
     
     # Create tabs for sender and receiver modes
-    tab1, tab2, tab3 = st.tabs(["Receiver Mode", "Sender Mode", "Test Tools"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Receiver Mode", "Sender Mode", "RLYR 998 Settings", "Test Tools"])
     
     # Receiver Mode
     with tab1:
@@ -482,6 +608,19 @@ def main():
             # Display sender ID
             st.info(f"Your Sender ID: {st.session_state.sender_id}")
             
+            # RLYR 998 specific options
+            if comm_method == "RLYR 998":
+                st.subheader("RLYR 998 Options")
+                priority = st.select_slider(
+                    "Message Priority", 
+                    options=["Low", "Medium", "High", "Critical"],
+                    value="Medium"
+                )
+                
+                ack_mode = st.checkbox("Require Acknowledgment", value=True)
+                retry_count = st.slider("Retry Count", min_value=0, max_value=10, value=3)
+                hop_limit = st.slider("Maximum Hops", min_value=1, max_value=10, value=3)
+            
             # Button to send the request
             if st.button("Send Request"):
                 try:
@@ -497,6 +636,15 @@ def main():
                         "status": "pending",
                         "timestamp": int(time.time() * 1000)
                     }
+                    
+                    # Add RLYR 998 specific fields if applicable
+                    if comm_method == "RLYR 998":
+                        request_object.update({
+                            "priority": priority.lower(),
+                            "ack_required": ack_mode,
+                            "retry_count": retry_count,
+                            "hop_limit": hop_limit
+                        })
                     
                     # Convert to JSON
                     request_json = json.dumps(request_object)
@@ -564,93 +712,53 @@ def main():
                 
                 except Exception as e:
                     st.error(f"Error sending request: {str(e)}")
-
-    # Test Tools Tab (for development/testing without hardware)
+    
+    # RLYR 998 Settings Tab
     with tab3:
-        st.header("Test Tools")
-        st.warning("This tab is primarily for testing without actual hardware")
+        st.header("RLYR 998 Settings")
         
-        st.subheader("Communication Settings")
-        
-        # Firebase configuration settings
-        if comm_method == "Internet (Firebase)":
-            st.subheader("Firebase Configuration")
-            with st.expander("Update Firebase Configuration"):
-                api_key = st.text_input("API Key", value=get_firebase_config()["apiKey"])
-                auth_domain = st.text_input("Auth Domain", value=get_firebase_config()["authDomain"])
-                database_url = st.text_input("Database URL", value=get_firebase_config()["databaseURL"])
-                storage_bucket = st.text_input("Storage Bucket", value=get_firebase_config()["storageBucket"])
-                
-                if st.button("Update Firebase Config"):
-                    # Set environment variables
-                    os.environ["FIREBASE_API_KEY"] = api_key
-                    os.environ["FIREBASE_AUTH_DOMAIN"] = auth_domain
-                    os.environ["FIREBASE_DATABASE_URL"] = database_url
-                    os.environ["FIREBASE_STORAGE_BUCKET"] = storage_bucket
-                    st.success("Firebase configuration updated")
-                    st.rerun()
-        
-        # Meshtastic settings
-        elif comm_method == "Local Radio (Meshtastic)":
-            st.subheader("Meshtastic Settings")
-            with st.expander("Meshtastic Device Information"):
-                if isinstance(comm, MeshtasticRadio) and comm.connected:
-                    st.json(comm.node_info)
-                else:
-                    st.error("Not connected to a Meshtastic device")
-                    
-                # Port selection
-                available_ports = ["AUTO"]
-                try:
-                    import serial.tools.list_ports
-                    ports = list(serial.tools.list_ports.comports())
-                    available_ports += [p.device for p in ports]
-                except:
-                    available_ports += ["/dev/ttyUSB0", "/dev/ttyACM0", "COM3"]
-                
-                selected_port = st.selectbox("Serial Port", available_ports)
-                
-                if st.button("Reconnect Device"):
-                    if selected_port == "AUTO":
-                        selected_port = None
-                    st.session_state.meshtastic_port = selected_port
-                    # Force reinitialization
-                    for key in list(st.session_state.keys()):
-                        if key.startswith("current_method_"):
-                            del st.session_state[key]
-                    st.rerun()
-        
-        # Simulate messages (works with all communication methods)
-        st.subheader("Simulate Receiving Message")
-        sim_sender = st.text_input("Simulated Sender ID", value="SIM123")
-        sim_recipient = st.text_input("Recipient Code", value=st.session_state.get('receiver_code', ''))
-        sim_request_id = st.text_input("Request ID", value=str(uuid.uuid4()))
-        sim_data = st.text_area("Request Data", value="Test message")
-        
-        if st.button("Simulate Incoming Message"):
-            # Create a simulated message
-            sim_message = {
-                "recipient": sim_recipient,
-                "sender": sim_sender,
-                "request_id": sim_request_id,
-                "data": sim_data,
-                "status": "pending",
-                "timestamp": int(time.time() * 1000)
-            }
+        if comm_method != "RLYR 998":
+            st.warning("Please select RLYR 998 as the communication method to configure these settings.")
+        else:
+            st.info("Configure advanced settings for your RLYR 998 device.")
             
-            # Add to message queue
-            st.session_state.message_queue.put({"sender": sim_sender, "message": json.dumps(sim_message)})
-            st.success("Simulated message added to queue")
-
-# Handle app close
-def clean_up():
-    # Close any communication resources
-    if 'comm' in st.session_state:
-        st.session_state.comm.close()
-
-# Register cleanup handler
-import atexit
-atexit.register(clean_up)
-
-if __name__ == "__main__":
-    main()
+            # Device connection settings
+            st.subheader("Device Connection")
+            
+            # Port selection
+            available_ports = ["AUTO"]
+            try:
+                import serial.tools.list_ports
+                ports = list(serial.tools.list_ports.comports())
+                available_ports += [p.device for p in ports]
+            except:
+                available_ports += ["/dev/ttyUSB0", "/dev/ttyACM0", "COM3"]
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                selected_port = st.selectbox("Serial Port", available_ports)
+            with col2:
+                baudrate = st.selectbox("Baud Rate", [9600, 19200, 38400, 57600, 115200], index=4)
+            
+            if st.button("Connect"):
+                # Store settings in session state
+                st.session_state.rlyr998_port = selected_port if selected_port != "AUTO" else None
+                st.session_state.rlyr998_baudrate = baudrate
+                
+                # Force reinitialization
+                for key in list(st.session_state.keys()):
+                    if key.startswith("current_method_"):
+                        del st.session_state[key]
+                
+                st.success("Settings applied. Attempting to connect...")
+                st.rerun()
+            
+            # Network settings
+            st.subheader("Network Settings")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                network_id = st.text_input("Network ID", value="998-NET", max_chars=8)
+                channel = st.slider("Channel", min_value=1, max_value=32, value=12)
+            with col2:
+                power_level = st.select_slider
