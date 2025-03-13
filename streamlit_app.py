@@ -31,7 +31,7 @@ if 'responses' not in st.session_state:
 
 # Firebase config - you'll need to create a Firebase Realtime Database
 # and put your credentials here
-FIREBASE_URL = "https://your-firebase-project.firebaseio.com"  # Replace with your Firebase URL
+FIREBASE_URL = "https://science-project-c6e47-default-rtdb.firebaseio.com/"  # Replace with your Firebase URL
 # If you have a Firebase API key (for some operations)
 FIREBASE_API_KEY = ""  # Optional
 
