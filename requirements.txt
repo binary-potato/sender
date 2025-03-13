@@ -2,3 +2,4 @@ streamlit
 pyrebase4
 qrcode
 pillow
+meshtastic
