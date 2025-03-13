@@ -76,7 +76,7 @@ def main():
         # Button to generate a new code
         if st.button("Generate New Code"):
             st.session_state.receiver_code = generate_connection_code()
-            st.experimental_rerun()
+            st.rerun()  # Updated from experimental_rerun()
         
         # Custom handler settings
         st.subheader("Configure Request Handler")
@@ -101,7 +101,7 @@ def main():
         with col1:
             if st.button("Start Listening" if not st.session_state.listening else "Stop Listening"):
                 st.session_state.listening = not st.session_state.listening
-                st.experimental_rerun()
+                st.rerun()  # Updated from experimental_rerun()
         
         with col2:
             status = st.empty()
