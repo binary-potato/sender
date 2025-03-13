@@ -3,3 +3,4 @@ pyrebase4
 qrcode
 pillow
 meshtastic
+rlyr998
