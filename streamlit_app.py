@@ -181,11 +181,12 @@ class FirebaseComm:
 # Firebase configuration - no authentication
 def get_firebase_config():
     return {
-        "apiKey": os.environ.get("FIREBASE_API_KEY", "your-api-key"),
-        "authDomain": os.environ.get("FIREBASE_AUTH_DOMAIN", "your-project-id.firebaseapp.com"),
-        "databaseURL": os.environ.get("FIREBASE_DATABASE_URL", "https://your-project-id-default-rtdb.firebaseio.com/"),
-        "storageBucket": os.environ.get("FIREBASE_STORAGE_BUCKET", "your-project-id.appspot.com"),
+        "apiKey": os.environ.get("FIREBASE_API_KEY", "AIzaSyBAspGDK14JlqF9RgumIc40DL-SMdshz8c"),
+        "authDomain": os.environ.get("FIREBASE_AUTH_DOMAIN", "science-project-c6e47.firebaseapp.com"),
+        "databaseURL": os.environ.get("FIREBASE_DATABASE_URL", "https://science-project-c6e47-default-rtdb.firebaseio.com"),
+        "storageBucket": os.environ.get("FIREBASE_STORAGE_BUCKET", "science-project-c6e47.firebasestorage.app"),
     }
+   
 
 # Initialize communication method
 @st.cache_resource
