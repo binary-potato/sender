@@ -119,11 +119,15 @@ class FirebaseComm:
             self.firebase = pyrebase.initialize_app(config)
             self.db = self.firebase.database()
             self.connected = True
+            print("Firebase successfully connected!")
         except Exception as e:
             print(f"Firebase initialization error: {e}")
+            import traceback
+            traceback.print_exc()
     
     def send_message(self, recipient, message):
         if not self.connected or self.db is None:
+            print("Firebase not connected or DB is None")
             return False
             
         try:
@@ -133,10 +137,17 @@ class FirebaseComm:
             
             # Create path in Firebase
             conn_path = f"connections/{recipient}/requests/{request_id}"
+            print(f"Writing to Firebase path: {conn_path}")
+            print(f"Message data: {message_data}")
+            
+            # Set data in Firebase
             self.db.child(conn_path).set(message_data)
+            print("Firebase write successful")
             return True
         except Exception as e:
             print(f"Error sending Firebase message: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def check_messages(self, recipient_code):
@@ -159,6 +170,8 @@ class FirebaseComm:
                         }
         except Exception as e:
             print(f"Error checking Firebase messages: {e}")
+            import traceback
+            traceback.print_exc()
             
         return None
     
@@ -172,27 +185,35 @@ class FirebaseComm:
             return True
         except Exception as e:
             print(f"Error updating request status: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def close(self):
         # Nothing to do for Firebase
         pass
 
-# Firebase configuration - no authentication
+# Firebase configuration
 def get_firebase_config():
+    # Use your actual Firebase credentials
     return {
-        "apiKey": os.environ.get("FIREBASE_API_KEY", "AIzaSyBAspGDK14JlqF9RgumIc40DL-SMdshz8c"),
-        "authDomain": os.environ.get("FIREBASE_AUTH_DOMAIN", "science-project-c6e47.firebaseapp.com"),
-        "databaseURL": os.environ.get("FIREBASE_DATABASE_URL", "https://science-project-c6e47-default-rtdb.firebaseio.com"),
-        "storageBucket": os.environ.get("FIREBASE_STORAGE_BUCKET", "science-project-c6e47.firebasestorage.app"),
+        "apiKey": "AIzaSyBAspGDK14JlqF9RgumIc40DL-SMdshz8c",
+        "authDomain": "science-project-c6e47.firebaseapp.com",
+        "databaseURL": "https://science-project-c6e47-default-rtdb.firebaseio.com",
+        "projectId": "science-project-c6e47",
+        "storageBucket": "science-project-c6e47.firebasestorage.app",
+        "messagingSenderId": "544287963506",
+        "appId": "1:544287963506:web:f0f3e5d88df062f787c5eb",
+        "measurementId": "G-R8Y7XX4G4Y"
     }
-   
 
 # Initialize communication method
 @st.cache_resource
 def initialize_communication(method="mock"):
     if method == "firebase":
-        return FirebaseComm(get_firebase_config())
+        comm = FirebaseComm(get_firebase_config())
+        print(f"Firebase initialized with connected status: {comm.connected}")
+        return comm
     elif method == "meshtastic":
         if MESHTASTIC_AVAILABLE:
             return MeshtasticRadio()
@@ -227,6 +248,7 @@ def generate_qr_code(code):
 
 # Background thread for checking messages
 def background_message_checker(comm, message_queue, code=None, is_firebase=False):
+    print(f"Starting message checker thread. Firebase: {is_firebase}, Code: {code}")
     while True:
         try:
             if is_firebase:
@@ -235,10 +257,13 @@ def background_message_checker(comm, message_queue, code=None, is_firebase=False
                 message = comm.check_messages()
                 
             if message:
+                print(f"Message received in background thread: {message}")
                 message_queue.put(message)
-            time.sleep(0.1)  # Check every 100ms
+            time.sleep(0.5)  # Check every 500ms
         except Exception as e:
             print(f"Error in message checker: {e}")
+            import traceback
+            traceback.print_exc()
             time.sleep(1)  # Back off on error
 
 # Main app
@@ -264,6 +289,9 @@ def main():
     # Initialize communication
     comm = initialize_communication(method_map[comm_method])
     is_firebase = method_map[comm_method] == "firebase"
+    
+    # Store comm in session_state for potential later use
+    st.session_state.comm = comm
     
     # Show connection status
     if comm.connected:
@@ -381,7 +409,6 @@ def main():
                     message_content = message.get("message", "{}")
                     
                     try:
-                        # Try to parse the message as JSON
                         data = json.loads(message_content)
                         
                         # Check if this message is for us
@@ -565,6 +592,8 @@ def main():
                 
                 except Exception as e:
                     st.error(f"Error sending request: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
 
     # Test Tools Tab (for development/testing without hardware)
     with tab3:
@@ -576,21 +605,22 @@ def main():
         # Firebase configuration settings
         if comm_method == "Internet (Firebase)":
             st.subheader("Firebase Configuration")
-            with st.expander("Update Firebase Configuration"):
-                api_key = st.text_input("API Key", value=get_firebase_config()["apiKey"])
-                auth_domain = st.text_input("Auth Domain", value=get_firebase_config()["authDomain"])
-                database_url = st.text_input("Database URL", value=get_firebase_config()["databaseURL"])
-                storage_bucket = st.text_input("Storage Bucket", value=get_firebase_config()["storageBucket"])
+            with st.expander("Firebase Configuration Details"):
+                st.code(json.dumps(get_firebase_config(), indent=2), language="json")
                 
-                if st.button("Update Firebase Config"):
-                    # Set environment variables
-                    os.environ["AIzaSyBAspGDK14JlqF9RgumIc40DL-SMdshz8c"] = api_key
-                    os.environ["science-project-c6e47.firebaseapp.com"] = auth_domain
-                    os.environ["https://science-project-c6e47-default-rtdb.firebaseio.com"] = database_url
-                    os.environ["science-project-c6e47.firebasestorage.app"] = storage_bucket
-                    st.success("Firebase configuration updated")
-                    st.rerun()
-   
+                st.info("Firebase connection status: " + ("Connected" if comm.connected else "Disconnected"))
+                
+                if st.button("Test Firebase Connection"):
+                    try:
+                        # Try to read a simple path
+                        test_result = comm.db.child("test").get().val()
+                        st.success("Firebase connection successful!")
+                    except Exception as e:
+                        st.error(f"Firebase connection test failed: {e}")
+                        import traceback
+                        traceback.print_exc()
+        
+        # Meshtastic settings
         elif comm_method == "Local Radio (Meshtastic)":
             st.subheader("Meshtastic Settings")
             with st.expander("Meshtastic Device Information"):
@@ -641,6 +671,31 @@ def main():
             # Add to message queue
             st.session_state.message_queue.put({"sender": sim_sender, "message": json.dumps(sim_message)})
             st.success("Simulated message added to queue")
+            
+        # Direct Firebase testing
+        if comm_method == "Internet (Firebase)":
+            st.subheader("Direct Firebase Testing")
+            
+            test_path = st.text_input("Firebase Test Path", value="test")
+            test_value = st.text_input("Test Value", value="Hello from Streamlit")
+            
+            if st.button("Write Test Value"):
+                try:
+                    comm.db.child(test_path).set(test_value)
+                    st.success(f"Successfully wrote to {test_path}")
+                except Exception as e:
+                    st.error(f"Failed to write to Firebase: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            if st.button("Read Test Value"):
+                try:
+                    value = comm.db.child(test_path).get().val()
+                    st.success(f"Value at {test_path}: {value}")
+                except Exception as e:
+                    st.error(f"Failed to read from Firebase: {e}")
+                    import traceback
+                    traceback.print_exc()
 
 # Handle app close
 def clean_up():
