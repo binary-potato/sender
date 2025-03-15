@@ -2,12 +2,11 @@ import streamlit as st
 import serial
 import time
 import json
-import random
 import threading
 
 # App title and description
-st.title("LoRa Receiver")
-st.write("This app listens for messages from another LoRa device and processes requests according to custom rules.")
+st.title("LoRa Sender")
+st.write("This app sends commands to a LoRa receiver device and displays responses.")
 
 # Sidebar for configuration
 with st.sidebar:
@@ -18,7 +17,7 @@ with st.sidebar:
     
     # LoRa specific settings
     st.subheader("LoRa Settings")
-    address = st.number_input("Device Address", min_value=1, max_value=65535, value=random.randint(100, 65535))
+    address = st.number_input("Device Address", min_value=1, max_value=65535, value=1)
     network_id = st.number_input("Network ID", min_value=0, max_value=16, value=0)
     spreading_factor = st.selectbox("Spreading Factor", options=[7, 8, 9, 10, 11, 12], index=5)
     bandwidth = st.selectbox("Bandwidth", options=["125 kHz", "250 kHz", "500 kHz"], index=0)
@@ -73,84 +72,35 @@ def initialize_lora():
         st.error(f"Failed to initialize: {str(e)}")
         return None
 
-# Function to handle received data
-def handle_request(request_json):
-    try:
-        request = json.loads(request_json)
-        
-        # Execute custom handler if available
-        if 'custom_handler' in st.session_state and st.session_state.custom_handler.strip():
-            try:
-                # Create a local scope with the request variable
-                local_vars = {"request": request, "random": random}
-                exec(st.session_state.custom_handler, globals(), local_vars)
-                
-                # Get the result from the local scope
-                if 'result' in local_vars:
-                    return json.dumps(local_vars['result'])
-                else:
-                    return json.dumps({"status": "error", "message": "Custom handler didn't set 'result'"})
-            except Exception as e:
-                return json.dumps({"status": "error", "message": f"Custom handler error: {str(e)}"})
-        
-        # Default handlers for common requests
-        if request.get("command") == "read":
-            sensor = request.get("sensor", "")
-            if sensor == "temperature":
-                return json.dumps({
-                    "status": "success", 
-                    "temperature": round(random.uniform(20.0, 30.0), 1),
-                    "unit": "C"
-                })
-            elif sensor == "humidity":
-                return json.dumps({
-                    "status": "success", 
-                    "humidity": round(random.uniform(30.0, 80.0), 1),
-                    "unit": "%"
-                })
-            elif sensor in ["BME280", "DHT22"]:
-                return json.dumps({
-                    "status": "success", 
-                    "temperature": round(random.uniform(20.0, 30.0), 1),
-                    "humidity": round(random.uniform(30.0, 80.0), 1),
-                    "pressure": round(random.uniform(990.0, 1010.0), 1) if sensor == "BME280" else None
-                })
-        elif request.get("command") == "gpio":
-            pin = request.get("pin")
-            state = request.get("state")
-            return json.dumps({
-                "status": "success",
-                "message": f"Set GPIO pin {pin} to {state}"
-            })
-            
-        # Default response for unknown commands
-        return json.dumps({
-            "status": "error",
-            "message": "Unknown command or invalid request"
-        })
-        
-    except json.JSONDecodeError:
-        return json.dumps({"status": "error", "message": "Invalid JSON format"})
-    except Exception as e:
-        return json.dumps({"status": "error", "message": str(e)})
-
-# Function to send a response
-def send_response(ser, address, message):
-    command = f"AT+SEND={address},{len(message)},{message}\r\n"
+# Function to send a message
+def send_message(ser, dest_addr, message):
+    command = f"AT+SEND={dest_addr},{len(message)},{message}\r\n"
     ser.write(command.encode())
     time.sleep(0.5)
     response = ser.readline().decode().strip()
     return response
 
-# Function to read messages from the serial port
-def message_listener(ser):
-    while not st.session_state.stop_thread:
+# Function to wait for and parse a response
+def wait_for_response(ser, timeout=30):
+    start_time = time.time()
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    while time.time() - start_time < timeout:
+        # Update progress bar
+        elapsed = time.time() - start_time
+        progress = min(elapsed / timeout, 1.0)
+        progress_bar.progress(progress)
+        status_text.text(f"Waiting for response... ({int(elapsed)}s / {timeout}s)")
+        
         if ser.in_waiting > 0:
             data = ser.readline().decode().strip()
             
             # Check if it's a received message
             if data.startswith("+RCV"):
-                # Parse the received data
+                progress_bar.progress(1.0)
+                status_text.text("Response received!")
+                
                 try:
                     # Format: +RCV=<addr>,<length>,<data>,<rssi>,<snr>
                     parts = data.split(",")
@@ -160,64 +110,33 @@ def message_listener(ser):
                     rssi = parts[-2]
                     snr = parts[-1]
                     
-                    # Add to logs
-                    st.session_state.log.append(f"Received from {src_addr}: {message}")
-                    
-                    # Process request
-                    response = handle_request(message)
-                    st.session_state.log.append(f"Sending response: {response}")
-                    
-                    # Send response
-                    result = send_response(ser, src_addr, response)
-                    st.session_state.log.append(f"Send result: {result}")
-                    
+                    return {
+                        "source": src_addr,
+                        "message": message,
+                        "rssi": rssi,
+                        "snr": snr
+                    }
                 except Exception as e:
-                    st.session_state.log.append(f"Error processing message: {str(e)}")
+                    return {"error": f"Failed to parse response: {str(e)}"}
             else:
                 # Other module output
                 st.session_state.log.append(f"Module: {data}")
                 
         time.sleep(0.1)
+    
+    progress_bar.progress(1.0)
+    status_text.text("Timeout: No response received.")
+    return None
 
 # Initialize session state
 if 'initialized' not in st.session_state:
     st.session_state.initialized = False
     st.session_state.log = []
-    st.session_state.stop_thread = False
-    st.session_state.custom_handler = """# This is your custom handler code
-# The 'request' variable contains the parsed JSON request
-# You need to set 'result' to the response you want to send
-
-command = request.get("command", "")
-
-if command == "custom":
-    param = request.get("param", "")
-    value = request.get("value", "")
-    
-    # Example custom processing
-    result = {
-        "status": "success",
-        "command": command,
-        "processed": f"Processed {param} with value {value}",
-        "timestamp": time.time()
-    }
-elif command == "calculate":
-    # Example calculation handler
-    x = request.get("x", 0)
-    y = request.get("y", 0)
-    operation = request.get("operation", "add")
-    
-    if operation == "add":
-        result = {"status": "success", "result": x + y}
-    elif operation == "multiply":
-        result = {"status": "success", "result": x * y}
-    else:
-        result = {"status": "error", "message": f"Unknown operation: {operation}"}
-# The default handlers will process other standard commands
-"""
+    st.session_state.receiver_addr = None
+    st.session_state.last_response = None
 
 # Main app layout
-tabs = st.tabs(["Connection", "Custom Handler", "Logs"])
+tabs = st.tabs(["Connection", "Send Command", "Response", "Logs"])
 
 with tabs[0]:
     col1, col2 = st.columns(2)
@@ -235,46 +154,122 @@ with tabs[0]:
                 if ser:
                     st.session_state.ser = ser
                     st.session_state.initialized = True
-                    
-                    # Start listener thread
-                    st.session_state.stop_thread = False
-                    thread = threading.Thread(target=message_listener, args=(ser,))
-                    thread.daemon = True
-                    thread.start()
-                    st.session_state.thread = thread
-                    
                     st.experimental_rerun()
         else:
             if st.button("Disconnect"):
-                st.session_state.stop_thread = True
-                time.sleep(0.5)  # Give thread time to stop
                 st.session_state.ser.close()
                 st.session_state.initialized = False
+                st.session_state.receiver_addr = None
                 st.experimental_rerun()
     
     with col2:
-        st.subheader("Connection Code")
-        if st.session_state.initialized:
-            # Generate a hex code from the address
-            connection_code = hex(address)[2:].upper()
-            st.code(connection_code, language="text")
-            st.info("Share this code with the sender application")
-        else:
-            st.write("Connect to generate a code")
+        st.subheader("Receiver Connection")
+        
+        receiver_code = st.text_input("Enter Receiver's Connection Code")
+        
+        if st.button("Connect to Receiver") and receiver_code:
+            try:
+                # Convert hex code to address
+                receiver_addr = int(receiver_code, 16)
+                st.session_state.receiver_addr = receiver_addr
+                st.success(f"Connected to receiver with address: {receiver_addr}")
+            except ValueError:
+                st.error("Invalid connection code. Please enter a valid hexadecimal code.")
 
 with tabs[1]:
-    st.subheader("Custom Request Handler")
-    st.write("Define how to process incoming requests with custom Python code")
+    st.subheader("Send Command")
     
-    custom_code = st.text_area("Handler Code", 
-                              value=st.session_state.custom_handler,
-                              height=400)
-    
-    if st.button("Save Handler"):
-        st.session_state.custom_handler = custom_code
-        st.success("Custom handler saved!")
+    if not st.session_state.initialized:
+        st.warning("Please connect to the LoRa module first.")
+    elif not st.session_state.receiver_addr:
+        st.warning("Please connect to a receiver first.")
+    else:
+        # Command selection
+        command_type = st.selectbox(
+            "Select Command Type",
+            ["Standard Commands", "Custom Command"]
+        )
+        
+        if command_type == "Standard Commands":
+            standard_command = st.selectbox(
+                "Select Command",
+                ["Read Temperature", "Read Humidity", "Read BME280 Sensor", "Control GPIO"]
+            )
+            
+            # Set command details based on selection
+            if standard_command == "Read Temperature":
+                command_json = json.dumps({"command": "read", "sensor": "temperature"})
+            elif standard_command == "Read Humidity":
+                command_json = json.dumps({"command": "read", "sensor": "humidity"})
+            elif standard_command == "Read BME280 Sensor":
+                command_json = json.dumps({"command": "read", "sensor": "BME280"})
+            elif standard_command == "Control GPIO":
+                gpio_pin = st.number_input("GPIO Pin Number", min_value=0, max_value=40, value=13)
+                gpio_state = st.selectbox("Pin State", ["HIGH", "LOW"])
+                command_json = json.dumps({"command": "gpio", "pin": gpio_pin, "state": gpio_state})
+        else:
+            # Custom command JSON editor
+            st.write("Enter custom JSON command:")
+            command_json = st.text_area(
+                "Custom JSON",
+                value="""{"command": "custom", "param": "example", "value": "test"}""",
+                height=150
+            )
+            
+            # Validate JSON
+            try:
+                json.loads(command_json)
+                st.success("Valid JSON format")
+            except json.JSONDecodeError as e:
+                st.error(f"Invalid JSON: {str(e)}")
+        
+        # Send button
+        if st.button("Send Command"):
+            st.session_state.log.append(f"Sending to {st.session_state.receiver_addr}: {command_json}")
+            
+            # Send the command
+            result = send_message(st.session_state.ser, st.session_state.receiver_addr, command_json)
+            st.session_state.log.append(f"Send result: {result}")
+            
+            # Wait for response
+            with st.spinner("Waiting for response..."):
+                response = wait_for_response(st.session_state.ser)
+                
+                if response:
+                    st.session_state.log.append(f"Response received: {response}")
+                    st.session_state.last_response = response
+                    st.success("Response received! See the Response tab for details.")
+                else:
+                    st.error("No response received within the timeout period.")
 
 with tabs[2]:
+    st.subheader("Response")
+    
+    if st.session_state.last_response:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("Response Details:")
+            st.write(f"Source Address: {st.session_state.last_response.get('source', 'N/A')}")
+            st.write(f"Signal Strength (RSSI): {st.session_state.last_response.get('rssi', 'N/A')} dBm")
+            st.write(f"Signal-to-Noise Ratio: {st.session_state.last_response.get('snr', 'N/A')} dB")
+        
+        with col2:
+            try:
+                # Try to parse the message as JSON
+                if 'message' in st.session_state.last_response:
+                    message_json = json.loads(st.session_state.last_response['message'])
+                    st.json(message_json)
+            except json.JSONDecodeError:
+                # If not JSON, show as plain text
+                if 'message' in st.session_state.last_response:
+                    st.code(st.session_state.last_response['message'])
+                else:
+                    st.write("No message content available")
+    else:
+        st.info("No response has been received yet. Send a command first.")
+
+with tabs[3]:
     st.subheader("Communication Logs")
     
     # Display logs in reverse order (newest first)
