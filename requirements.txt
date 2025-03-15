@@ -1,3 +1,2 @@
-streamlit
-serial
-time
+streamlit>=1.18.0
+pyserial>=3.5
